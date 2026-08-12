@@ -1,0 +1,20 @@
+{
+  "name": "finosu-intake-callbot",
+  "version": "1.0.0",
+  "description": "Inbound voice bot that takes a loan application over the phone, decides on it, and emails the filled form.",
+  "private": true,
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "sim": "node tools/simulate.js",
+    "test": "node test/run.js",
+    "fetch-directory": "node tools/fetch-fedach.js",
+    "preflight": "node tools/preflight.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

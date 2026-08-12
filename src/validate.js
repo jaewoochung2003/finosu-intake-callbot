@@ -1,0 +1,351 @@
+// validate.js — is this value real?
+//
+// The fraud requirement in the brief is "make sure the bank routing number and
+// account number are real numbers." Those two are not the same problem:
+//
+//   Routing number. A nine digit ABA number carries a check digit. The Fed's own
+//   formula is 3(d1+d4+d7) + 7(d2+d5+d8) + (d3+d6+d9), and a real number leaves a
+//   remainder of zero mod 10. Nine random digits pass that by luck one time in ten,
+//   so the checksum alone is not enough. data/routing-directory.json holds the
+//   18,198 routing numbers in the FedACH participant file with the institution that
+//   owns each one, and a number that is not in it is not a routing number no matter
+//   what the arithmetic says. That table is also what lets the bot read the bank's
+//   name back to the caller, which catches the honest transposition the checksum
+//   would have caught silently.
+//
+//   Account number. There is no check digit. Nothing computed from the digits can
+//   tell a real account from a plausible one — only the bank can, through a
+//   micro-deposit pair or an instant-verification provider, and that is a call
+//   placed after the phone call ends. What this file can do is refuse the shapes
+//   that are never accounts: wrong length, one digit repeated, a straight run like
+//   123456789, and a value that is just the routing number said twice. Those are
+//   what a person making a number up on the spot actually produces.
+//
+// Every validator returns { ok, value, error, note }. `value` is the normalized
+// form that goes on the application. `note` is something the bot can say out loud.
+
+const fs = require('fs');
+const path = require('path');
+const P = require('./parse');
+
+// ---------- routing directory ----------
+
+let DIRECTORY = null;
+
+function directory() {
+  if (DIRECTORY !== null) return DIRECTORY;
+  const file = path.join(__dirname, '..', 'data', 'routing-directory.json');
+  try {
+    DIRECTORY = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    DIRECTORY = {}; // checksum-only mode; run tools/fetch-fedach.js to populate
+  }
+  return DIRECTORY;
+}
+
+function bankName(routing) {
+  return directory()[routing] || null;
+}
+
+// ---------- routing number ----------
+
+// Valid ABA prefixes: 00-12 government and Federal Reserve, 21-32 thrift,
+// 61-72 electronic, 80 traveler's checks. Everything else was never issued.
+function validPrefix(rn) {
+  const p = Number(rn.slice(0, 2));
+  return (p >= 0 && p <= 12) || (p >= 21 && p <= 32) || (p >= 61 && p <= 72) || p === 80;
+}
+
+function abaChecksum(rn) {
+  const d = rn.split('').map(Number);
+  const sum =
+    3 * (d[0] + d[3] + d[6]) +
+    7 * (d[1] + d[4] + d[7]) +
+    1 * (d[2] + d[5] + d[8]);
+  return sum % 10 === 0;
+}
+
+function validateRouting(said) {
+  const digits = P.spokenDigits(said);
+  if (digits.length !== 9) {
+    return {
+      ok: false,
+      error: `heard ${digits.length || 'no'} digits, a routing number is nine`,
+    };
+  }
+  if (!validPrefix(digits)) {
+    return { ok: false, error: 'those first two digits are not a routing number prefix' };
+  }
+  if (!abaChecksum(digits)) {
+    return { ok: false, error: 'that number fails the routing number check digit' };
+  }
+  const dir = directory();
+  const name = dir[digits];
+  if (Object.keys(dir).length && !name) {
+    return { ok: false, error: 'that number is not in the Federal Reserve ACH directory' };
+  }
+  return { ok: true, value: digits, note: name ? `bank on file: ${name}` : null, bank: name };
+}
+
+// ---------- account number ----------
+
+const MIN_ACCOUNT = 4;
+const MAX_ACCOUNT = 17;
+
+function allSameDigit(s) {
+  return /^(\d)\1+$/.test(s);
+}
+
+function isRun(s) {
+  let up = true;
+  let down = true;
+  for (let i = 1; i < s.length; i++) {
+    if (Number(s[i]) !== Number(s[i - 1]) + 1) up = false;
+    if (Number(s[i]) !== Number(s[i - 1]) - 1) down = false;
+  }
+  return up || down;
+}
+
+function validateAccount(said, context = {}) {
+  const digits = P.spokenDigits(said);
+  if (digits.length < MIN_ACCOUNT || digits.length > MAX_ACCOUNT) {
+    return {
+      ok: false,
+      error: `heard ${digits.length || 'no'} digits, an account number is ${MIN_ACCOUNT} to ${MAX_ACCOUNT}`,
+    };
+  }
+  if (allSameDigit(digits)) {
+    return { ok: false, error: 'that is the same digit repeated, which is not an account number' };
+  }
+  if (digits.length >= 6 && isRun(digits)) {
+    return { ok: false, error: 'that is a straight run of digits, which is not an account number' };
+  }
+  if (context.routing && digits === context.routing) {
+    return { ok: false, error: 'that is the routing number again, not the account number' };
+  }
+  if (context.ssn4 && digits === context.ssn4) {
+    return { ok: false, error: 'that is the social security digits again, not the account number' };
+  }
+  return {
+    ok: true,
+    value: digits,
+    // Said out loud so the caller can catch a transposition. The digits themselves
+    // never go in a log line — see redact().
+    note: `${digits.length} digits, ending ${digits.slice(-4)}`,
+  };
+}
+
+// ---------- everything else ----------
+
+function validateName(said) {
+  const name = P.parseName(said);
+  if (!name) return { ok: false, error: 'I did not catch a name' };
+  const parts = name.split(' ').filter((w) => w.length > 1);
+  if (parts.length < 2) return { ok: false, error: 'I need a first and a last name' };
+  if (name.length > 70) return { ok: false, error: 'that was longer than a name' };
+  return { ok: true, value: name };
+}
+
+function validateEmail(said) {
+  const email = P.parseEmail(said);
+  if (!email) return { ok: false, error: 'that did not come through as an email address' };
+  if (!/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/.test(email)) {
+    return { ok: false, error: 'that did not come through as an email address' };
+  }
+  if (email.length > 100) return { ok: false, error: 'that was longer than an email address' };
+  return { ok: true, value: email, note: `read back as ${email}` };
+}
+
+function validateDob(said, asOf) {
+  const iso = P.parseDate(said);
+  if (!iso) return { ok: false, error: 'that did not come through as a date' };
+  const age = P.ageOn(iso, asOf);
+  if (age < 18) return { ok: false, error: 'applicants have to be eighteen or older', fatal: true };
+  if (age > 110) return { ok: false, error: 'that date of birth is not possible' };
+  return { ok: true, value: iso, note: `age ${age}` };
+}
+
+function validateSsn4(said) {
+  const digits = P.spokenDigits(said);
+  if (digits.length !== 4) {
+    return { ok: false, error: `heard ${digits.length || 'no'} digits, I need the last four` };
+  }
+  if (digits === '0000') return { ok: false, error: 'four zeros is not a valid social security ending' };
+  return { ok: true, value: digits };
+}
+
+// North American numbering plan: area code and exchange both start 2-9.
+function validatePhone(said) {
+  let digits = P.spokenDigits(said);
+  if (digits.length === 11 && digits[0] === '1') digits = digits.slice(1);
+  if (digits.length !== 10) {
+    return { ok: false, error: `heard ${digits.length || 'no'} digits, a phone number is ten` };
+  }
+  if ('01'.includes(digits[0]) || '01'.includes(digits[3])) {
+    return { ok: false, error: 'that is not a working phone number' };
+  }
+  const value = `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+  return { ok: true, value, note: `read back as ${value}` };
+}
+
+function validateZip(said) {
+  const digits = P.spokenDigits(said);
+  if (digits.length === 9) {
+    return { ok: true, value: `${digits.slice(0, 5)}-${digits.slice(5)}` };
+  }
+  if (digits.length !== 5) {
+    return { ok: false, error: `heard ${digits.length || 'no'} digits, a zip code is five` };
+  }
+  return { ok: true, value: digits };
+}
+
+function validateState(said) {
+  const code = P.parseState(said);
+  if (!code) return { ok: false, error: 'I did not catch a state' };
+  return { ok: true, value: code };
+}
+
+function validateText(said, opts = {}) {
+  const clean = String(said == null ? '' : said).replace(/\s+/g, ' ').trim();
+  if (clean.length < (opts.min || 2)) return { ok: false, error: 'I did not catch that' };
+  if (clean.length > (opts.max || 120)) return { ok: false, error: 'that was longer than I can take' };
+  return { ok: true, value: clean };
+}
+
+function validateYesNo(said) {
+  const answer = P.parseYesNo(said);
+  if (answer === null) return { ok: false, error: 'I need a yes or a no' };
+  return { ok: true, value: answer, note: answer ? 'yes' : 'no' };
+}
+
+function validateEnum(said, options, synonyms) {
+  const picked = P.parseEnum(said, options, synonyms);
+  if (!picked) return { ok: false, error: `I need one of: ${options.join(', ')}` };
+  return { ok: true, value: picked };
+}
+
+// The brief asks a yes/no: is the salary over 2000 a month. Storing the answer to
+// that question and nothing else is the most lossy thing this bot could do with an
+// income figure. The threshold is policy and policy moves; the number is the fact.
+// So the question asked is "how much", the boolean is derived, and both are stored.
+//
+// People answer in the period they are paid in, so "four hundred a week" is
+// converted before the comparison. 400 a week is 1,733 a month, not 1,600, and the
+// difference straddles the line the brief cares about.
+function validateMonthlyIncome(said, payFrequency) {
+  const amount = P.parseAmount(said);
+  if (amount === null) {
+    return { ok: false, error: 'I need a rough dollar figure' };
+  }
+
+  let mult = P.monthlyMultiplier(said);
+  if (mult === null) {
+    // "twenty dollars an hour" needs hours worked, which is a question this form
+    // does not ask. Better to say so than to invent a 40 hour week.
+    return { ok: false, error: 'I need that per month, per week, or per paycheck' };
+  }
+
+  if (mult === undefined) {
+    if (P.perPaycheck(said)) {
+      // "twelve hundred a paycheck" means whatever their pay cycle is, which the
+      // call has already asked. Without a cycle there is nothing to convert by.
+      if (!payFrequency) {
+        return { ok: false, error: 'I need to know how often you are paid first' };
+      }
+      mult = frequencyMultiplier(payFrequency);
+    } else {
+      // No period named at all. The question asked for a month, so a bare number is
+      // a month. An earlier version converted bare numbers by the pay frequency,
+      // which multiplied a monthly answer by 2.17 for anyone paid weekly.
+      mult = 1;
+    }
+  }
+
+  const monthly = Math.round(amount * mult);
+  if (monthly > 500000) return { ok: false, error: 'that figure did not come through' };
+  return {
+    ok: true,
+    value: monthly,
+    note: `about ${monthly.toLocaleString('en-US')} dollars a month`,
+  };
+}
+
+// The backstop, asked only when three tries at a figure produced nothing. A caller
+// who will not name a number can still answer the threshold question, and a yes/no
+// is worth more than an empty field.
+function validateIncomeOver(said, threshold, payFrequency) {
+  const amount = P.parseAmount(said);
+  if (amount !== null) {
+    const figure = validateMonthlyIncome(said, payFrequency);
+    if (figure.ok) {
+      return {
+        ok: true,
+        value: figure.value > threshold,
+        monthlyIncome: figure.value,
+        note: figure.note,
+      };
+    }
+  }
+  const answer = P.parseYesNo(said);
+  if (answer === null) return { ok: false, error: 'I need a yes or a no' };
+  return { ok: true, value: answer, note: answer ? 'yes' : 'no' };
+}
+
+function frequencyMultiplier(freq) {
+  const f = String(freq).toLowerCase();
+  if (f.startsWith('week')) return 52 / 12;
+  if (f.startsWith('bi')) return 26 / 12;
+  if (f.startsWith('semi')) return 2;
+  if (f.startsWith('month')) return 1;
+  return 1;
+}
+
+// ---------- logging ----------
+
+// What a transcript line is allowed to keep. Account numbers, routing numbers and
+// social digits never appear in a log file in the clear; the application record
+// holds them, the log holds their shape.
+function redact(fieldKey, text) {
+  const sensitive = ['ssn_last_four', 'account_number', 'routing_number'];
+  if (!sensitive.includes(fieldKey)) return text;
+  return String(text == null ? '' : text)
+    .replace(/\d/g, '#')
+    .replace(
+      /\b(zero|oh|o|nought|naught|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fourty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|double|triple)\b/gi,
+      '#',
+    );
+}
+
+// Keeps the last four of a long number so a human can match it against a statement.
+// A value four digits or shorter IS the last four, so it is masked whole: an earlier
+// version returned a four digit social security ending unchanged, which put it in
+// the clear in the correction log.
+function maskAccount(digits) {
+  if (!digits) return '';
+  const s = String(digits);
+  return s.length <= 4 ? '*'.repeat(s.length) : '*'.repeat(s.length - 4) + s.slice(-4);
+}
+
+module.exports = {
+  abaChecksum,
+  validPrefix,
+  bankName,
+  directorySize: () => Object.keys(directory()).length,
+  validateRouting,
+  validateAccount,
+  validateName,
+  validateEmail,
+  validateDob,
+  validateSsn4,
+  validatePhone,
+  validateZip,
+  validateState,
+  validateText,
+  validateYesNo,
+  validateEnum,
+  validateMonthlyIncome,
+  validateIncomeOver,
+  frequencyMultiplier,
+  redact,
+  maskAccount,
+};

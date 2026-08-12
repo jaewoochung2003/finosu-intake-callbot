@@ -1,0 +1,15 @@
+# secrets
+.env
+
+# dependencies
+node_modules/
+
+# one call's record, written at hangup. Real applications, never committed.
+calls/
+
+# the tunnel binary (52 MB) and anything downloaded to run locally
+bin/
+
+# logs and scratch
+*.log
+.probe/
