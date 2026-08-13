@@ -160,14 +160,18 @@ t('model audio is forwarded to Twilio with a mark behind it', () => {
   assert.strictEqual(twilio.ofEvent('mark').length, 1);
 });
 
-t('the caller talking over the bot clears the queued audio', async () => {
+// The bot is deaf until its line finishes. On a speakerphone it hears its own voice,
+// and honoring that as a barge-in cleared the queued audio and dropped "Is that
+// right?" off the end of a read-back. While the line is still generating, a
+// speech_started is ignored — no clear, no cancel.
+t('the bot is not interrupted while it is still speaking its line', async () => {
   const { twilio, openai } = startCall();
   openai.emit('message', JSON.stringify({ type: 'response.created' }));
   openai.emit('message', JSON.stringify({ type: 'response.output_audio.delta', delta: 'BBBB' }));
-  await sleep(750); // past the grace window that ignores noise at the start of a line
+  await sleep(750); // well past the old grace window; still no interruption
   openai.emit('message', JSON.stringify({ type: 'input_audio_buffer.speech_started' }));
-  assert.strictEqual(twilio.ofEvent('clear').length, 1);
-  assert.strictEqual(openai.ofType('response.cancel').length, 1);
+  assert.strictEqual(twilio.ofEvent('clear').length, 0);
+  assert.strictEqual(openai.ofType('response.cancel').length, 0);
 });
 
 // Line hiss at the moment the bot opens its mouth was reading as an interruption,
@@ -181,17 +185,18 @@ t('noise in the first moment of a line is not an interruption', () => {
   assert.strictEqual(twilio.ofEvent('clear').length, 0);
 });
 
-// The API answers a cancel with an error when nothing is generating, and it was
-// answering one on every single turn, which drowned the log a person reads after a
-// call that went wrong.
-t('nothing is cancelled when the model is not talking', async () => {
+// Audio the carrier is still playing after the model finished generating is the tail
+// of the current line — the read-back's "Is that right?" lives right here. A caller
+// noise while it plays must not clear it, and since nothing is generating no cancel is
+// sent either (a cancel with nothing active is an API error that used to spam the log).
+t('the tail still playing after the line is generated is not cut', async () => {
   const { twilio, openai } = startCall();
   openai.emit('message', JSON.stringify({ type: 'response.created' }));
   openai.emit('message', JSON.stringify({ type: 'response.output_audio.delta', delta: 'BBBB' }));
   openai.emit('message', JSON.stringify({ type: 'response.done', response: { output: [] } }));
   await sleep(750);
   openai.emit('message', JSON.stringify({ type: 'input_audio_buffer.speech_started' }));
-  assert.strictEqual(twilio.ofEvent('clear').length, 1, 'queued audio still has to be dropped');
+  assert.strictEqual(twilio.ofEvent('clear').length, 0, 'the queued tail must keep playing');
   assert.strictEqual(openai.ofType('response.cancel').length, 0);
 });
 

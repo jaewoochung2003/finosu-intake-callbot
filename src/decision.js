@@ -24,9 +24,21 @@ const V = require('./validate');
 // application that carries an income figure, which is why the figure is stored.
 const INCOME_THRESHOLD = 2000;
 
+// Fields with no reject rule of their own that an Approved application still cannot
+// be missing. Without this gate the decision only looked at the seven rule fields,
+// so a call that passed the five knockouts and gave the two bank numbers could end
+// Approved with no name, no social, no date of birth and no address — a caller who
+// hung up after the account number, or whose name never validated, got a clean green
+// Approved over blank identity lines. A missing one of these now forces Incomplete,
+// which is the recoverable outcome DECISIONS.md already promises for a left-empty field.
+const REQUIRED_FIELDS = [
+  'name', 'email', 'birthday', 'ssn_last_four',
+  'street_1', 'city', 'state', 'zip',
+];
+
 // Every application, approved or declined, is stamped with the rule set it faced.
 // Without it you cannot tell later whether an old decline would still be a decline.
-const POLICY_VERSION = '2026-08-11.1';
+const POLICY_VERSION = '2026-08-13.1';
 
 const RULES = [
   {
@@ -73,11 +85,14 @@ const RULES = [
     // application that carries a figure, which is the reason for capturing it.
     //
     // The boundary: the brief's field says "over 2000" and its rule says reject
-    // "less than 2000", which disagree at exactly 2,000. This follows the field and
-    // declines at exactly 2,000. Flip the comparison here to follow the rule.
+    // "less than 2000", which disagree at exactly 2,000. This follows the rule, so
+    // 2,000 exactly is accepted. The field wording describes a form line; the rule is
+    // the instruction to refuse someone, and refusing a person the reject rule does
+    // not name is the error you cannot defend to them afterwards. Flip to <= here to
+    // follow the field instead.
     applies: (app) =>
       typeof app.monthly_income === 'number'
-        ? app.monthly_income <= INCOME_THRESHOLD
+        ? app.monthly_income < INCOME_THRESHOLD
         : app.income_over_2000 === false,
     needs: ['income_over_2000'],
   },
@@ -149,11 +164,46 @@ function firstKnockout(app) {
   return allKnockouts(app)[0] || null;
 }
 
+// The stored record on disk is the nested apiPayload, but every rule here reads flat
+// top-level keys. Flatten the payload back so decide() reproduces the same outcome
+// from a stored calls/<sid>.json as it gave live — the replay the brief asks for. A
+// record that is already flat passes through unchanged.
+function rehydrate(app) {
+  if (!app || !app.application) return app;
+  const a = app.application;
+  const u = (x) => (x == null ? undefined : x);
+  const g = (obj, k) => (obj ? u(obj[k]) : undefined);
+  return {
+    name: g(a.applicant, 'name'),
+    email: g(a.applicant, 'email'),
+    birthday: g(a.applicant, 'birthday'),
+    ssn_last_four: g(a.applicant, 'ssn_last_four'),
+    sms_number: g(a.applicant, 'sms_number'),
+    street_1: g(a.address, 'street_1'),
+    street_2: g(a.address, 'street_2'),
+    city: g(a.address, 'city'),
+    state: g(a.address, 'state'),
+    zip: g(a.address, 'zip'),
+    routing_number: g(a.bank_account, 'routing_number'),
+    account_number: g(a.bank_account, 'account_number'),
+    account_type: g(a.bank_account, 'account_type'),
+    bank_name: g(a.bank_account, 'institution'),
+    employment_status: g(a.employment, 'status'),
+    employer_name: g(a.employment, 'employer_name'),
+    employer_address: g(a.employment, 'employer_address'),
+    income_over_2000: g(a.employment, 'income_over_2000'),
+    monthly_income: g(a.employment, 'monthly_income_estimate'),
+    deployed_military: g(a.eligibility, 'deployed_military'),
+    financial_assistance: g(a.eligibility, 'financial_assistance'),
+  };
+}
+
 // The full decision over a finished record.
 //   Declined  — at least one rule fired
 //   Approved  — every rule was reachable and none fired
 //   Incomplete — the call ended before the rules could all be evaluated
-function decide(app, opts = {}) {
+function decide(input, opts = {}) {
+  const app = rehydrate(input);
   const fired = [];
   const unevaluated = [];
 
@@ -181,12 +231,19 @@ function decide(app, opts = {}) {
     };
   }
 
-  if (unevaluated.length) {
+  // Rules all passed. An Approved application still cannot be missing a required
+  // identity or address field; a missing one is Incomplete, not Approved.
+  const missingRequired = REQUIRED_FIELDS.filter(
+    (k) => app[k] === undefined || app[k] === null || app[k] === '',
+  );
+
+  if (unevaluated.length || missingRequired.length) {
     return {
       policyVersion: POLICY_VERSION,
       decision: 'Incomplete',
       reasons: [],
       unevaluated,
+      missingRequired,
       spoken: 'We did not get all the way through the application. Someone will follow up by email.',
     };
   }
@@ -196,6 +253,7 @@ function decide(app, opts = {}) {
     decision: 'Approved',
     reasons: [],
     unevaluated: [],
+    missingRequired: [],
     spoken:
       'Everything checks out on my end. Your application is going through for review and ' +
       'you will get an email confirming what I have.',
@@ -206,10 +264,12 @@ module.exports = {
   RULES,
   KNOCKOUT_CODES,
   KNOCKOUT_KEYS,
+  REQUIRED_FIELDS,
   INCOME_THRESHOLD,
   POLICY_VERSION,
   screeningSettled,
   allKnockouts,
   firstKnockout,
+  rehydrate,
   decide,
 };

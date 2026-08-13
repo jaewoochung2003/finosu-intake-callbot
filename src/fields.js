@@ -39,12 +39,23 @@ const PAY_FREQUENCY_SYNONYMS = {
   'once a week': 'Weekly',
   'every two weeks': 'Biweekly',
   'every other week': 'Biweekly',
+  'bi weekly': 'Biweekly',
+  'fortnightly': 'Biweekly',
+  'fortnight': 'Biweekly',
+  'every other monday': 'Biweekly',
+  'every other tuesday': 'Biweekly',
+  'every other wednesday': 'Biweekly',
+  'every other thursday': 'Biweekly',
+  'every other friday': 'Biweekly',
   'twice a month': 'Semiweekly',
   'two times a month': 'Semiweekly',
+  'twice monthly': 'Semiweekly',
   'semi monthly': 'Semiweekly',
   'semimonthly': 'Semiweekly',
   'semi weekly': 'Semiweekly',
-  'twice a week': 'Semiweekly',
+  // "twice a week" is not one of the brief's four cadences and is not semimonthly;
+  // folding it into Semiweekly converted a twice-weekly paycheck at half the real
+  // rate. Left out so it re-asks instead of banking a wrong frequency.
   'once a month': 'Monthly',
   'every month': 'Monthly',
 };
@@ -150,6 +161,14 @@ const FIELDS = [
     ask: "What's your work situation right now?",
     reask: 'Working, self-employed, unemployed, retired, or a student?',
     knockout: true,
+    // Someone out of work has no salary and no employer, so the pay, income and
+    // employer questions below skip on this value (appliesWhen on each). The two
+    // income slots the decision needs are filled here instead of asked: no wages is a
+    // monthly income of 0, which is under the line, so the record shows both
+    // NOT_EMPLOYED and INCOME_BELOW_2000 without ever asking an out-of-work caller
+    // how much they earn. Retired and Student still get asked — a pension or a
+    // part-time job can clear the line.
+    derive: (v) => (v === 'Unemployed' ? { monthly_income: 0, income_over_2000: false } : {}),
     validate: (said) => V.validateEnum(said, EMPLOYMENT_STATUSES, EMPLOYMENT_SYNONYMS),
   },
   {
@@ -162,6 +181,18 @@ const FIELDS = [
     group: 'Employment',
     ask: 'How often are you paid? Weekly, every two weeks, twice a month, or monthly.',
     reask: 'Weekly, every two weeks, twice a month, or monthly?',
+    // Not asked of someone who just said they are unemployed; skipped to N/A.
+    appliesWhen: (app) => app.employment_status !== 'Unemployed',
+    // A student or anyone with no regular pay cycle has no answer among the four, and
+    // without this they looped on the question. "Never"/"irregular"/"it varies" is a
+    // real answer: mark it N/A, skip the pay-day question, and read income as a plain
+    // monthly figure (frequencyMultiplier falls back to 1).
+    optional: true,
+    skipOn: (said) =>
+      /\b(never|no regular|irregular|it varies|varies|dont get paid|do not get paid|no pay|nothing regular|whenever|not regularly|no set|no schedule)\b/i.test(
+        String(said),
+      ),
+    skipValue: 'N/A',
     validate: (said) => V.validateEnum(said, PAY_FREQUENCIES, PAY_FREQUENCY_SYNONYMS),
   },
   {
@@ -171,6 +202,9 @@ const FIELDS = [
     ask: "And roughly how much do you bring in a month? A ballpark is fine, or tell me what one paycheck is and I'll work it out.",
     reask: 'A rough dollar figure is all I need.',
     knockout: true,
+    // Skipped for the unemployed: employment_status already set this to 0. No skipValue,
+    // so advance() leaves that 0 in place rather than overwriting it.
+    appliesWhen: (app) => app.employment_status !== 'Unemployed',
     // The boolean the brief asks for is derived here rather than asked, so the
     // record keeps the number. Move the threshold and this follows it.
     derive: (monthly) => ({ income_over_2000: monthly > INCOME_THRESHOLD }),
@@ -217,6 +251,16 @@ const FIELDS = [
       V.validateEnum(said, ['Checking', 'Savings'], {
         'check in': 'Checking',
         'chequing': 'Checking',
+        // Credit-union and business terms. "Share draft" is the credit-union word for
+        // checking; without it the only CU term understood was "share savings", the
+        // one that declines. A bare "business account" is overwhelmingly checking.
+        'share draft': 'Checking',
+        'draft account': 'Checking',
+        'business account': 'Checking',
+        'business checking': 'Checking',
+        'commercial checking': 'Checking',
+        'share savings': 'Savings',
+        'share account': 'Savings',
         'saving': 'Savings',
       }),
   },
@@ -226,7 +270,7 @@ const FIELDS = [
     key: 'ssn_last_four',
     label: 'Last Four of Social',
     group: 'Applicant',
-    ask: 'Last four of your social. You can say them, or type them on the keypad.',
+    ask: 'The last four digits of your social security number. You can say them, or type them on the keypad.',
     reask: 'Those four digits one more time?',
     dtmf: 4,
     sensitive: true,
@@ -246,7 +290,7 @@ const FIELDS = [
     // you bank at Wells Fargo does.
     confirm: true,
     confirmLine: (v, app) =>
-      `Okay, ${V.spellDigits(v)}${app && app.bank_name ? `. That's ${app.bank_name}` : ''}.`,
+      `Okay, ${V.spellDigits(v)}${app && app.bank_name ? `. That's ${app.bank_name.replace(/\s*\([A-Z]{2}\)\s*$/, '')}` : ''}.`,
     respell: 'Let me take that routing number again, one digit at a time.',
     validate: (said) => V.validateRouting(said),
   },
@@ -315,6 +359,9 @@ const FIELDS = [
     label: 'Employer Name',
     group: 'Employment',
     ask: 'Who do you work for?',
+    // An out-of-work caller has no employer; skip the whole employer block to N/A.
+    appliesWhen: (app) => app.employment_status !== 'Unemployed',
+    skipValue: 'N/A',
     validate: (said) => V.validateText(said, { min: 2, max: 80 }),
   },
   {
@@ -324,6 +371,7 @@ const FIELDS = [
     // Plenty of hourly jobs have no department, and without a skip phrase the
     // answer "I don't have one" gets written in as the department.
     ask: 'Are you in a particular department? If not, no problem.',
+    appliesWhen: (app) => app.employment_status !== 'Unemployed',
     optional: true,
     // Bounded: a department really called "Not-For-Profit Services" reads as a no
     // to the yes/no parser, and without the word cap it gets thrown away.
@@ -364,6 +412,8 @@ const FIELDS = [
     group: 'Employment',
     ask: "What's the address where you work? Street, city and state is plenty.",
     reask: 'The work address one more time?',
+    appliesWhen: (app) => app.employment_status !== 'Unemployed',
+    skipValue: 'N/A',
     validate: (said) => V.validateText(said, { min: 6, max: 160 }),
   },
   {
@@ -373,6 +423,7 @@ const FIELDS = [
     ask: 'And a phone number for your employer, if they have one.',
     reask: 'That phone number one more time?',
     dtmf: 10,
+    appliesWhen: (app) => app.employment_status !== 'Unemployed',
     // A freelancer's client or a one-person shop has no phone line, and a caller
     // saying so was re-asked three times for a number that does not exist. Same
     // skip the department question has.

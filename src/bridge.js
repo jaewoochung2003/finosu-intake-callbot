@@ -50,8 +50,10 @@ const DTMF_DEAF_MS = 800;
 // Hard stop on how long the sockets stay open after the decision, waiting for the
 // closing line to finish playing.
 const CLOSE_MAX_MS = 15000;
-// How long after the bot starts a line before an interruption counts as one.
-const BARGE_IN_GRACE_MS = 700;
+// The mic is held shut while the bot speaks its line. This caps how long that hold can
+// last, so a lost play-completion mark can never leave the caller unheard. Longer than
+// the longest line (the greeting), short enough that a real stuck queue self-heals.
+const MAX_DEAF_MS = 25000;
 // A quiet line. The first is a nudge, the second ends the call: a caller who has put
 // the phone down should not hold an open line and a running model session, and one
 // who is looking for a bank statement needs longer than a pause.
@@ -148,9 +150,19 @@ function handleCall(twilioWs, opts = {}) {
     // Cancelling when nothing is generating is an error back from the API on every
     // turn, which buries the log lines that matter under noise.
     if (cancelFirst && responseActive) toOpenai({ type: 'response.cancel' });
+    // Word for word, not "in your own voice." Every line here is already written to
+    // be spoken, and the paraphrase latitude let the model drop the "Is that right?"
+    // off a read-back and turn "spell your first name" into "your last name". The
+    // exact text is the contract; the model's only job is to voice it.
     toOpenai({
       type: 'response.create',
-      response: { instructions: `Say this to the caller, in your own voice: "${line}"` },
+      response: {
+        instructions:
+          'Say this line to the caller, out loud, word for word from the first word to the ' +
+          'last, including the question at the end if there is one. Do not add anything before ' +
+          'or after it, and do not change any word. Then stop and wait.\n' +
+          `LINE: ${line}`,
+      },
     });
   };
 
@@ -203,8 +215,20 @@ function handleCall(twilioWs, opts = {}) {
       case 'input_audio_buffer.speech_started':
         lastActivity = Date.now();
         nudged = false;
-        if (Date.now() - speakingSince < BARGE_IN_GRACE_MS) break;
+        // Deaf until the line finishes. While the bot is still generating its line
+        // (responseActive) or that line is still playing out (markQueue), a
+        // speech_started is the bot's own voice on a speakerphone, a click, or line
+        // noise — not a real interruption. The caller's audio is not even being
+        // forwarded right now (the media gate below holds it). Honoring it here is what
+        // sent Twilio a `clear` mid-read-back and dropped the queued "Is that right?"
+        // before it played, which is why the caller heard the name spelled and then
+        // nothing. Ignore it while the bot speaks; the time cap matches the media gate
+        // so a lost play-completion mark cannot wedge the bot deaf forever.
+        if ((responseActive || markQueue.length > 0) && Date.now() - speakingSince < MAX_DEAF_MS) break;
+        // A genuine interruption after the line finished: stop the queued audio and
+        // cancel any in-flight response so the caller is not talked over.
         if (markQueue.length && streamSid) {
+          log(session.callSid, 'barge-in: caller cut in after the line, clearing audio');
           toTwilio({ event: 'clear', streamSid });
           if (responseActive) toOpenai({ type: 'response.cancel' });
           markQueue = [];
@@ -228,6 +252,13 @@ function handleCall(twilioWs, opts = {}) {
 
       case 'response.function_call_arguments.done':
         onToolCall(msg.call_id, msg.name, msg.arguments);
+        break;
+
+      // What the bot actually said, so a dropped or reworded line is visible in the
+      // log instead of guessed at from the caller's report.
+      case 'response.output_audio_transcript.done':
+      case 'response.audio_transcript.done':
+        if (msg.transcript) log(session.callSid, 'bot:', msg.transcript.slice(0, 160));
         break;
 
       case 'response.done': {
@@ -350,10 +381,12 @@ function handleCall(twilioWs, opts = {}) {
       accepted: !!r.accepted,
       problem: r.problem || null,
       note: r.note || null,
-      // Fields the caller has to be able to catch an error on: the email address and
-      // the two bank numbers. The model is told to say the value back before it asks
-      // the next question.
-      read_back: !!r.readBack,
+      // Fields the caller has to be able to catch an error on: the name, the email
+      // address and the two bank numbers. intake flags these as `confirming`, so the
+      // model gets read_back:true and speaks the "Is that right?" verbatim, then stops.
+      // This read the wrong key (`readBack`) and was always false, so the model treated
+      // a read-back as an ordinary line and dropped the confirm question.
+      read_back: !!(r.readBack || r.confirming),
       say_next: r.say || null,
       done: !!r.done,
     };
@@ -379,6 +412,15 @@ function handleCall(twilioWs, opts = {}) {
         break;
 
       case 'media':
+        // Deaf while the bot is speaking. `responseActive` covers the line being
+        // generated; `markQueue` covers the audio still playing out after that. On a
+        // speakerphone the bot hears its own voice, and a mouse click or a cough
+        // counted as the caller barging in, which cancelled the line mid-sentence and
+        // dropped the "Is that right?" off a read-back. Holding the mic shut until the
+        // line has finished playing removes the whole class of self-interruption. The
+        // keypad still works — DTMF is handled separately and can stop the bot. The time
+        // cap keeps a stuck queue from ever leaving the caller unheard.
+        if ((responseActive || markQueue.length > 0) && Date.now() - speakingSince < MAX_DEAF_MS) break;
         toOpenai({ type: 'input_audio_buffer.append', audio: data.media.payload });
         break;
 

@@ -76,9 +76,11 @@ question.** Fields carry a `confirm` flag which reaches the model as `read_back`
 the tool result. The flag existed for a while with nothing reading it, which meant
 the read-back the design assumed was never happening.
 
-**Exactly 2,000 declines.** The brief's field says "over 2000" and its rule says
-reject "less than 2000". Those disagree at exactly 2,000. This follows the field.
-One comparison in `decision.js` flips it. Worth confirming which was meant.
+**Exactly 2,000 approves.** The brief's field says "over 2000" and its rule says
+reject "less than 2000". Those disagree at exactly 2,000. This follows the reject
+rule: 2,000 is not "less than 2000", so it is not refused. Refusing someone the
+reject rule does not name is the error you cannot defend to them. One comparison in
+`decision.js` (`<` to `<=`) flips it to follow the field instead.
 
 **The raw words are kept next to the normalized value.** "March fourth nineteen
 ninety four" sits beside `1994-03-04`. A parse found to be wrong later can be re-run

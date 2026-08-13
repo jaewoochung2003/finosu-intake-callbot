@@ -195,8 +195,10 @@ monthly, because that is what the question asked.
 
 There is one boundary the brief contradicts itself on. The field says "over 2000"
 and the rule says reject "less than 2000", which disagree at exactly 2,000. This
-follows the field and declines at exactly 2,000. One comparison in `decision.js`
-flips it.
+follows the rule and approves at exactly 2,000: the field wording describes a line on
+a form, the rule is the instruction to refuse a person, and someone earning exactly
+2,000 is not someone the reject rule names. One comparison in `decision.js` flips it
+the other way.
 
 
 **"Semiweekly."** The four standard payroll cycles are weekly, biweekly,
@@ -257,7 +259,7 @@ under time pressure actually produces. Anything past that needs the bank.
 | `BANK_ACCOUNT_INVALID` | Account number is not a usable account number |
 | `ACCOUNT_TYPE_SAVINGS` | Savings rather than checking |
 | `NOT_EMPLOYED` | Employment status is Unemployed |
-| `INCOME_BELOW_2000` | Monthly income figure is not above 2,000 dollars, or the yes/no backstop said no |
+| `INCOME_BELOW_2000` | Monthly income figure is below 2,000 dollars, or the yes/no backstop said no |
 | `DEPLOYED_MILITARY` | Deployed active duty or a dependent |
 | `FINANCIAL_ASSISTANCE` | Receiving government assistance |
 

@@ -39,9 +39,13 @@ const MAX_ATTEMPTS = 3;
 // numbers mean opening a banking app, and a caller who hits that question cold
 // either sits in dead air or hangs up. Saying it in the first ten seconds costs a
 // sentence and buys the caller the whole rest of the call to get ready.
+// This is spoken with the first question glued on after it (bridge.js), so it must
+// NOT end on a closing phrase. "...and we'll get started" read as the end of the
+// model's turn and it dropped the first question, leaving dead air. Ending on the
+// prep note lets "Can I start with your first name?" follow naturally.
 const GREETING =
   'Thanks for calling Finosu. I can take your loan application right now. Have your ' +
-  "routing and account numbers handy, plus the last four of your social, and we'll get started.";
+  'routing number, your account number, and the last four digits of your social security number ready.';
 
 function startSession(opts = {}) {
   const now = Date.now();
@@ -201,20 +205,18 @@ function submit(session, said, opts = {}) {
     return {
       accepted: false,
       problem: result.error,
-      say: `${result.error === undefined ? '' : `Sorry, ${result.error}. `}${field.reask || field.ask}`,
+      // A validator can hand back a complete follow-up question in `reprompt` (the
+      // year-only date does). Say that alone; do not glue the generic re-ask after it.
+      say: result.reprompt
+        ? result.reprompt
+        : `${result.error === undefined ? '' : `Sorry, ${result.error}. `}${field.reask || field.ask}`,
       done: false,
     };
   }
 
   session.record[field.key] = result.value;
   noteCapture(session, field, { raw: said, value: result.value, source });
-
-  // A field can settle more than its own slot: the income figure settles the
-  // over-2000 question the brief asks for, so the record keeps the number and the
-  // boolean is computed rather than asked.
-  if (field.derive) Object.assign(session.record, field.derive(result.value, session.record));
-  if (result.monthlyIncome !== undefined) session.record.monthly_income = result.monthlyIncome;
-  if (result.bank) session.record.bank_name = result.bank;
+  applyDerived(session, field, result);
 
   const knocked = maybeKnockout(session, field);
   if (knocked) return knocked;
@@ -253,6 +255,17 @@ function confirmLine(field, value, record) {
   return field.confirmLine ? field.confirmLine(value, record || {}) : `I have ${value}.`;
 }
 
+// A field can settle more than its own slot: the income figure settles the
+// over-2000 boolean, the routing number carries its bank name, the two name halves
+// derive the joined name the form prints. This block ran on the first capture but
+// not when a caller corrected the value at the read-back, so a corrected routing
+// number kept the first bank's name, and a corrected surname never reached the form.
+function applyDerived(session, field, result) {
+  if (field.derive) Object.assign(session.record, field.derive(result.value, session.record));
+  if (result.monthlyIncome !== undefined) session.record.monthly_income = result.monthlyIncome;
+  if (result.bank) session.record.bank_name = result.bank;
+}
+
 function resolveConfirmation(session, said) {
   const pending = session.pending;
   const field = FIELDS.find((f) => f.key === pending.key);
@@ -264,6 +277,17 @@ function resolveConfirmation(session, said) {
     said: V.redact(field.key, said),
     source: 'confirm',
   });
+
+  // A correction wearing an agreement word: "yeah, actually it's nathan at gmail
+  // dot com." parseYesNo sees the leading "yeah" and would confirm the wrong value.
+  // If the utterance carries a correction cue AND validates to a value that differs
+  // from the pending one, it is a correction, not a confirmation. Gated on the cue
+  // words (not just length) so a plain "yeah that is right, thanks" still confirms.
+  const hasCorrectionCue = /\b(actually|wait|no|not|its|it is|should be|meant|make it|change)\b/i.test(said);
+  if (answer !== false && hasCorrectionCue) {
+    const early = field.validate(said, session.record);
+    if (early.ok && early.value !== pending.value) return acceptCorrection(session, field, said, early);
+  }
 
   if (answer === true) {
     session.pending = null;
@@ -291,14 +315,17 @@ function resolveConfirmation(session, said) {
 
   // Not a yes or a no. Take it as the corrected answer if it reads as one.
   const retry = field.validate(said, session.record);
-  if (retry.ok && retry.value !== pending.value) {
-    session.record[field.key] = retry.value;
-    noteCapture(session, field, { raw: said, value: retry.value, source: 'speech' });
-    session.pending = { key: field.key, value: retry.value, tries: 0 };
+  if (retry.ok && retry.value !== pending.value) return acceptCorrection(session, field, said, retry);
+
+  // "What?" / "say that again" is a request to repeat, not a failure to confirm.
+  // Re-read the value without counting it toward giving up, so a caller on a bad
+  // line who asks for a repeat is not skipped past with the value locked in.
+  if (/\b(what|huh|pardon|sorry|repeat|again|come again|didnt (hear|catch)|one more time|say that)\b/.test(
+    String(said).toLowerCase(),
+  )) {
     return {
-      accepted: true,
-      say: `${confirmLine(field, retry.value, session.record)} Is that right?`,
-      confirming: true,
+      accepted: false,
+      say: `${confirmLine(field, pending.value, session.record)} Is that right?`,
       done: false,
     };
   }
@@ -306,11 +333,54 @@ function resolveConfirmation(session, said) {
   pending.tries += 1;
   if (pending.tries >= 2) {
     session.pending = null;
+    // Never silently bank a sensitive value the caller never confirmed. A misheard
+    // SSN or bank number that reaches the record is worse than an Incomplete, so
+    // send the field back to be re-captured (its own give-up marks it unresolved).
+    if (field.sensitive) {
+      delete session.record[field.key];
+      session.index = FIELDS.findIndex((f) => f.key === field.key);
+      session.attempts = 0;
+      session.askedAt = Date.now();
+      return {
+        accepted: false,
+        say: field.respell || `Let's try that one again. ${currentField(session).ask}`,
+        done: false,
+      };
+    }
     return step(session, { accepted: true });
   }
   return {
     accepted: false,
     say: `Sorry, was that a yes or a no? ${confirmLine(field, pending.value, session.record)} Is that right?`,
+    done: false,
+  };
+}
+
+// A corrected value heard at the read-back. Stores it, runs the same derived block
+// the first capture runs (bank name, joined name, income boolean), and reads the
+// new value back for another confirm. Skipping the derived block was the bug that
+// kept the first bank's name against a corrected routing number.
+function acceptCorrection(session, field, said, retry) {
+  // The value the caller is replacing goes to the correction log, same as undoLast,
+  // so a read-back correction is auditable — a routing number swapped from one bank
+  // to another after hearing the first read back leaves a record of the first one.
+  // This is the most common correction path and it was the one dropping the trail.
+  const prior = session.record[field.key];
+  if (prior !== undefined && prior !== retry.value) {
+    session.corrections.push({
+      field: field.key,
+      previous: field.sensitive ? V.maskAccount(String(prior)) : prior,
+      at: new Date().toISOString(),
+    });
+  }
+  session.record[field.key] = retry.value;
+  noteCapture(session, field, { raw: said, value: retry.value, source: 'speech' });
+  applyDerived(session, field, retry);
+  session.pending = { key: field.key, value: retry.value, tries: 0 };
+  return {
+    accepted: true,
+    say: `${confirmLine(field, retry.value, session.record)} Is that right?`,
+    confirming: true,
     done: false,
   };
 }
@@ -335,15 +405,21 @@ function step(session, { accepted, note }) {
 
 function complete(session) {
   const outcome = decide(session.record);
-  return finishWith(session, outcome.decision, outcome.reasons, outcome.spoken);
+  return finishWith(session, outcome.decision, outcome.reasons, outcome.spoken, outcome.missingRequired);
 }
 
-function finishWith(session, decision, reasons, spoken) {
+function finishWith(session, decision, reasons, spoken, missingRequired = []) {
+  // A required field that was never reached (a hang-up before the address block) is
+  // not in session.unresolved, which only holds fields that hit their give-up limit.
+  // Merge them so the email's "not captured" line shows every hole, not just the
+  // ones the caller tried and failed.
+  const unresolved = session.unresolved.slice();
+  for (const k of missingRequired) if (!unresolved.includes(k)) unresolved.push(k);
   const outcome = {
     decision,
     policyVersion: POLICY_VERSION,
     reasons,
-    unresolved: session.unresolved.slice(),
+    unresolved,
     spoken:
       spoken ||
       (decision === 'Declined'
@@ -403,6 +479,17 @@ function undoLast(session) {
   if (field.key === 'routing_number') delete session.record.bank_name;
   if (field.key === 'monthly_income') delete session.record.income_over_2000;
   if (field.key === 'income_over_2000') delete session.record.monthly_income;
+  // Unemployed sets both income slots from the status answer (see fields.js). Walking
+  // back to the status question has to drop them, or a caller who corrects "unemployed"
+  // to "employed" keeps a stale income of 0 and never gets asked the figure.
+  if (field.key === 'employment_status') {
+    delete session.record.monthly_income;
+    delete session.record.income_over_2000;
+  }
+  // The joined `name` is derived from the last-name step, so walking back the FIRST
+  // name never recomputed it. Clearing it on either half means a retracted name can't
+  // survive as a stale value that satisfies the required-field gate.
+  if (field.key === 'first_name' || field.key === 'last_name') delete session.record.name;
   session.unresolved = session.unresolved.filter((k) => k !== field.key);
   session.index = i;
   session.attempts = 0;

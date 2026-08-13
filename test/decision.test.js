@@ -130,8 +130,13 @@ t('income figure above the line approves', () => {
   assert.strictEqual(d.decision, 'Approved');
 });
 
-t('exactly the threshold declines, following the field wording', () => {
+t('exactly the threshold approves, following the reject rule', () => {
   const d = decide({ ...CLEAN, monthly_income: INCOME_THRESHOLD });
+  assert.strictEqual(d.decision, 'Approved');
+});
+
+t('one dollar under the threshold declines', () => {
+  const d = decide({ ...CLEAN, monthly_income: INCOME_THRESHOLD - 1 });
   assert.deepStrictEqual(d.reasons.map((r) => r.code), ['INCOME_BELOW_2000']);
 });
 

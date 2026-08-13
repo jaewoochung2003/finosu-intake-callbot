@@ -38,7 +38,10 @@ function directory() {
   try {
     DIRECTORY = JSON.parse(fs.readFileSync(file, 'utf8'));
   } catch {
-    DIRECTORY = {}; // checksum-only mode; run tools/fetch-fedach.js to populate
+    // Do NOT cache the failure. A transient unreadable file used to latch the whole
+    // process into checksum-only mode, silently dropping the FedACH presence check
+    // for every later call. Returning an empty map without caching retries next time.
+    return {};
   }
   return DIRECTORY;
 }
@@ -84,6 +87,12 @@ function validateRouting(said) {
   if (Object.keys(dir).length && !name) {
     return { ok: false, error: 'that number is not in the Federal Reserve ACH directory' };
   }
+  // The FedACH file also lists the Federal Reserve Banks themselves. No consumer
+  // holds a deposit account there, so the famous test number 011000015 and its kin
+  // are not a real caller's bank — directory presence alone should not clear them.
+  if (name && /federal reserve/i.test(name)) {
+    return { ok: false, error: 'that is a Federal Reserve routing number, not a consumer bank' };
+  }
   return {
     ok: true,
     value: digits,
@@ -105,12 +114,17 @@ function allSameDigit(s) {
   return /^(\d)\1+$/.test(s);
 }
 
+// A straight sequence, counting the wrap: 1234567890 (9 rolls to 0) and 0987654321
+// are what a person types when inventing an account under pressure, and the old test
+// missed both because it only checked a plain +1/-1 with no wrap.
 function isRun(s) {
   let up = true;
   let down = true;
   for (let i = 1; i < s.length; i++) {
-    if (Number(s[i]) !== Number(s[i - 1]) + 1) up = false;
-    if (Number(s[i]) !== Number(s[i - 1]) - 1) down = false;
+    const prev = Number(s[i - 1]);
+    const cur = Number(s[i]);
+    if (cur !== (prev + 1) % 10) up = false;
+    if (cur !== (prev + 9) % 10) down = false;
   }
   return up || down;
 }
@@ -222,8 +236,25 @@ function spellEmail(email) {
 
 function validateDob(said, asOf) {
   const iso = P.parseDate(said);
-  if (!iso) return { ok: false, error: 'that did not come through as a date' };
+  if (!iso) {
+    // A day and month with no year ("the 28th of June") parses only once a year is
+    // added, so ask for the year specifically instead of re-asking the whole date.
+    if (P.parseDate(`${said} 1990`)) {
+      // A self-contained follow-up. `reprompt` tells intake.js to say this line by
+      // itself instead of wrapping it as "Sorry, ...? One more time on the date of
+      // birth", which asked for the whole date again right after asking only the year.
+      return {
+        ok: false,
+        error: 'I have the month and day, what year were you born?',
+        reprompt: 'I have the month and day. What year were you born?',
+      };
+    }
+    return { ok: false, error: 'that did not come through as a date' };
+  }
   const age = P.ageOn(iso, asOf);
+  // A date in the future is a mis-hear, not an underage applicant. Declining it as
+  // UNDER_18 turned a slip of the tongue into a permanent rejection; it re-asks.
+  if (age < 0) return { ok: false, error: 'that date is in the future' };
   if (age < 18) return { ok: false, error: 'applicants have to be eighteen or older', fatal: true };
   if (age > 110) return { ok: false, error: 'that date of birth is not possible' };
   return { ok: true, value: iso, note: `age ${age}` };
@@ -240,7 +271,10 @@ function validateSsn4(said) {
 
 // North American numbering plan: area code and exchange both start 2-9.
 function validatePhone(said) {
-  let digits = P.spokenDigits(said);
+  // Drop a spoken extension ("...extension 89") before counting, or its digits push
+  // a valid ten-digit number over the length check and it gets refused.
+  const trimmed = String(said == null ? '' : said).replace(/\b(ext|extension|x)\b[\s.]*\d+.*$/i, '');
+  let digits = P.spokenDigits(trimmed);
   if (digits.length === 11 && digits[0] === '1') digits = digits.slice(1);
   if (digits.length !== 10) {
     return { ok: false, error: `heard ${digits.length || 'no'} digits, a phone number is ten` };
@@ -348,23 +382,33 @@ function validateMonthlyIncome(said, payFrequency) {
 // who will not name a number can still answer the threshold question, and a yes/no
 // is worth more than an empty field.
 function validateIncomeOver(said, threshold, payFrequency) {
+  // The question is "is it more than two thousand?", so a caller answering "yes, more
+  // than two thousand" is echoing the threshold, not stating their income. When the
+  // answer is a clear yes/no and the only figure in it is the threshold itself (or it
+  // carries an over/under cue), take the yes/no — otherwise parseAmount grabbed the
+  // echoed 2,000 and declined a caller who had just said yes.
+  const answer = P.parseYesNo(said);
   const amount = P.parseAmount(said);
+  const echoesThreshold = amount === null || amount === threshold;
+  const overCue = /\b(over|more than|above|at least|north of|greater than|exceeds?|easily)\b/i.test(said);
+  const underCue = /\b(under|less than|below|not even|barely)\b/i.test(said);
+  if (answer === true && (echoesThreshold || overCue)) return { ok: true, value: true, note: null };
+  if (answer === false && (echoesThreshold || underCue)) return { ok: true, value: false, note: null };
+
   if (amount !== null) {
     const figure = validateMonthlyIncome(said, payFrequency);
     if (figure.ok) {
       return {
         ok: true,
-        value: figure.value > threshold,
+        // >= so the stored boolean agrees with decision.js, which accepts at exactly
+        // the threshold. If the two disagree, the form prints "no" over an approval.
+        value: figure.value >= threshold,
         monthlyIncome: figure.value,
         note: figure.note,
       };
     }
   }
-  const answer = P.parseYesNo(said);
   if (answer === null) return { ok: false, error: 'I need a yes or a no' };
-  // No note: with notes now spoken, echoing "yes" back at a yes/no answer reads as
-  // the bot talking to itself. Notes are for values the caller could not otherwise
-  // hear were misheard — the income figure, the bank name.
   return { ok: true, value: answer, note: null };
 }
 

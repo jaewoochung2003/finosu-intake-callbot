@@ -492,7 +492,7 @@ t('regression: a letter O inside a number is a zero', () => {
 
 t('regression: accented letters survive name parsing', () => {
   assert.strictEqual(P.parseName('María'), 'Maria');
-  assert.strictEqual(P.parseName('Álvarez-Cruz'), 'Alvarez-cruz');
+  assert.strictEqual(P.parseName('Álvarez-Cruz'), 'Alvarez-Cruz');
   assert.strictEqual(P.parseName('José Muñoz'), 'Jose Munoz');
   assert.strictEqual(P.parseName('Renée'), 'Renee');
 });
@@ -529,4 +529,465 @@ t('regression: the income figure comes back as a spoken note', () => {
   // and the yes/no screening answers right after it stay silent
   r = intake.submit(s, SCRIPTS.APPROVED[10]);
   assert.strictEqual(r.note, null, `military yes/no grew a note: ${JSON.stringify(r.note)}`);
+});
+
+// ---------- red-team round 1 (Aug 13): corrections at the read-back ----------
+// A corrected value heard at the read-back skipped the derived block, so a corrected
+// routing number kept the first bank's name and a corrected surname never reached
+// the joined `name` the form prints. Both are the safeguard failing at the exact
+// moment it exists for.
+
+t('regression: correcting the routing number updates the bank name', () => {
+  const s = intake.startSession({ callSid: 'reg' });
+  for (let i = 0; i <= 13; i++) intake.submit(s, SCRIPTS.APPROVED[i]);
+  intake.submit(s, 'zero two one zero zero zero zero two one'); // Chase, pending
+  intake.submit(s, 'zero two six zero zero nine five nine three'); // BofA correction
+  intake.submit(s, 'yes');
+  assert.strictEqual(s.record.routing_number, '026009593');
+  assert.match(s.record.bank_name, /BANK OF AMERICA/);
+});
+
+t('regression: the spoken bank name drops the state suffix', () => {
+  const say = require('../src/fields').BY_KEY.routing_number.confirmLine('021000021', {
+    bank_name: 'JPMORGAN CHASE (FL)',
+  });
+  assert.ok(!/\(FL\)/.test(say), `state suffix spoken: ${say}`);
+  assert.match(say, /JPMORGAN CHASE/);
+});
+
+t('regression: correcting the surname reaches the printed name', () => {
+  const s = intake.startSession({ callSid: 'reg' });
+  intake.submit(s, 'Gabriel');
+  intake.submit(s, 'Kim');
+  intake.submit(s, 'Chung'); // correction at the read-back, no leading "no"
+  intake.submit(s, 'yes');
+  assert.strictEqual(s.record.name, 'Gabriel Chung');
+});
+
+t('regression: a correction wearing a "yeah" is a correction, not a confirm', () => {
+  const s = intake.startSession({ callSid: 'reg' });
+  intake.submit(s, 'Gabriel');
+  intake.submit(s, 'Kim');
+  intake.submit(s, 'yes');
+  intake.submit(s, 'gabriel at finosu dot com');
+  intake.submit(s, 'yeah actually it is nathan at gmail dot com');
+  intake.submit(s, 'yes');
+  assert.strictEqual(s.record.email, 'nathan@gmail.com');
+});
+
+t('regression: a plain agreement still confirms', () => {
+  const s = intake.startSession({ callSid: 'reg' });
+  intake.submit(s, 'Gabriel');
+  intake.submit(s, 'Kim');
+  intake.submit(s, 'yes');
+  intake.submit(s, 'gabriel at finosu dot com');
+  const r = intake.submit(s, 'yeah that is right thanks');
+  assert.strictEqual(s.record.email, 'gabriel@finosu.com');
+  assert.match(r.say_next || r.say || '', /date of birth|birth/i);
+});
+
+// ---------- red-team round 1: hostile income answers ----------
+// "Between fifteen hundred and four thousand" was summed to 5,500, a figure the
+// caller never said; "one million a month" collapsed to 1 dollar and auto-declined.
+
+t('regression: a range is not a figure', () => {
+  assert.strictEqual(P.parseAmount('between fifteen hundred and four thousand a month'), null);
+  assert.strictEqual(P.parseAmount('fifteen hundred to four thousand'), null);
+  // a normal figure and a plain paycheck still parse
+  assert.strictEqual(P.parseAmount('about thirty two hundred a month'), 3200);
+  assert.strictEqual(P.parseAmount('twelve hundred a paycheck'), 1200);
+});
+
+t('regression: million scales instead of collapsing to one dollar', () => {
+  assert.strictEqual(P.parseAmount('one million dollars a month'), 1000000);
+  // and the income validator rejects it as a mis-hear rather than declining at 1 dollar
+  assert.strictEqual(V.validateMonthlyIncome('one million a month', 'Monthly').ok, false);
+});
+
+// ---------- red-team round 1: the identity question ----------
+// "Am I talking to a real person?" matched the "real person" stop pattern and could
+// end the call. It is a question about the bot, answered, not a request to leave.
+
+t('regression: an identity question is not a request to end the call', () => {
+  assert.strictEqual(P.saysStop('am I talking to a real person'), false);
+  assert.strictEqual(P.saysStop('are you a real person or an AI'), false);
+  assert.strictEqual(P.saysStop('is this a recording'), false);
+  // a genuine request to leave still ends it
+  assert.strictEqual(P.saysStop('I want to speak to a real person'), true);
+  assert.strictEqual(P.saysStop('transfer me to a human'), true);
+});
+
+// ---------- red-team round 2 (Aug 13): normal callers, not attackers ----------
+
+// "June twenty eighth" recorded June 8th: the compound ordinal's second word is in
+// ORDINALS, not ONES, so the tens word was dropped. Affects ~1/3 of birthdays.
+t('regression: a compound-ordinal day keeps its tens word', () => {
+  assert.strictEqual(P.parseDate('June twenty eighth nineteen ninety'), '1990-06-28');
+  assert.strictEqual(P.parseDate('March twenty first nineteen ninety four'), '1994-03-21');
+  assert.strictEqual(P.parseDate('December thirty first nineteen ninety'), '1990-12-31');
+  // the plain forms still work
+  assert.strictEqual(P.parseDate('March fourth nineteen ninety four'), '1994-03-04');
+  assert.strictEqual(P.parseDate('oh three oh four nineteen ninety four'), '1994-03-04');
+});
+
+// A date said day-first ("the third of April") recorded the 19th, grabbing the
+// year's leading word as the day.
+t('regression: a day-first date is read as the day, not the 19th', () => {
+  assert.strictEqual(P.parseDate('the third of April nineteen ninety'), '1990-04-03');
+  assert.strictEqual(P.parseDate('the fourth of March nineteen ninety four'), '1994-03-04');
+  assert.strictEqual(P.parseDate('the fifth of July two thousand'), '2000-07-05');
+});
+
+// Bare numbers with a single-digit month or day returned null and dead-ended the
+// caller: "3 4 94", "7 15 88".
+t('regression: a bare month-day-year date parses', () => {
+  assert.strictEqual(P.parseDate('3 4 94'), '1994-03-04');
+  assert.strictEqual(P.parseDate('7 15 88'), '1988-07-15');
+  assert.strictEqual(P.parseDate('12 4 1994'), '1994-12-04');
+});
+
+// "right" as filler flipped a clear no into a knockout decline. The two knockout
+// questions literally contain "right now".
+t('regression: "right" is not a standalone yes', () => {
+  assert.strictEqual(P.parseYesNo('right, no I am not deployed'), false);
+  assert.strictEqual(P.parseYesNo('well right now, no'), false);
+  // real yes/no words are unaffected
+  assert.strictEqual(P.parseYesNo('yes'), true);
+  assert.strictEqual(P.parseYesNo('correct'), true);
+  assert.strictEqual(P.parseYesNo('no'), false);
+});
+
+// Echoing the question ("Checking or savings? Checking.") named both options and
+// the 'saving' substring inside "savings" decided it as Savings — a false decline.
+t('regression: naming both account types is ambiguous, not savings', () => {
+  const AT = ['Checking', 'Savings'];
+  const syn = { 'check in': 'Checking', chequing: 'Checking', saving: 'Savings' };
+  assert.strictEqual(P.parseEnum('Checking or savings? Checking.', AT, syn), null);
+  assert.strictEqual(P.parseEnum('not savings, checking', AT, syn), null);
+  assert.strictEqual(P.parseEnum('checking', AT, syn), 'Checking');
+  assert.strictEqual(P.parseEnum('savings', AT, syn), 'Savings');
+  // and a longer option is not shadowed by a word it contains
+  const ES = ['Employed', 'Self-employed', 'Unemployed'];
+  assert.strictEqual(P.parseEnum('self employed', ES, {}), 'Self-employed');
+  assert.strictEqual(P.parseEnum('unemployed', ES, {}), 'Unemployed');
+});
+
+// Lakh/crore collapsed to the leading digit (same bug as million), and "a few grand"
+// silently defaulted the missing number to one.
+t('regression: lakh/crore scale, and vague quantifiers re-ask', () => {
+  assert.strictEqual(P.parseAmount('two lakh a month'), 200000);
+  assert.strictEqual(P.parseAmount('fifty lakh'), 5000000);
+  assert.strictEqual(P.parseAmount('a couple grand'), 2000);
+  assert.strictEqual(P.parseAmount('a few grand'), null);
+});
+
+// Two unclear turns on a sensitive-field read-back silently confirmed the pending
+// value, locking in a possibly-wrong SSN or bank number. It must re-capture instead.
+t('regression: a sensitive read-back never silently banks an unconfirmed value', () => {
+  const s = intake.startSession({ callSid: 'reg' });
+  for (let i = 0; i <= 13; i++) intake.submit(s, SCRIPTS.APPROVED[i]);
+  intake.submit(s, 'zero two one zero zero zero zero two one'); // routing, pending confirm
+  const repeat = intake.submit(s, 'huh what'); // a repeat request re-reads, no give-up
+  assert.match(repeat.say, /Is that right/);
+  intake.submit(s, 'zzz nonsense');
+  intake.submit(s, 'zzz nonsense'); // two unclear -> give-up
+  assert.strictEqual(s.record.routing_number, undefined, 'routing was banked without confirmation');
+});
+
+// ---------- red-team round 3 (Aug 13): adversarial applicant ----------
+
+// An invented account read as a near-sequence with a wrap ("...eight nine zero")
+// passed the fake-account shape test because the run check ignored the 9->0 roll.
+t('regression: a wrapped straight run is rejected as a fake account', () => {
+  assert.strictEqual(V.validateAccount('one two three four five six seven eight nine zero').ok, false);
+  assert.strictEqual(V.validateAccount('zero nine eight seven six five').ok, false);
+  // a real account is untouched
+  assert.strictEqual(V.validateAccount('five five one two three four zero nine eight seven').ok, true);
+});
+
+// The famous test routing number 011000015 belongs to a Federal Reserve Bank, which
+// the FedACH file lists; directory presence alone treated it as a real consumer bank.
+t('regression: a Federal Reserve routing number is refused', () => {
+  assert.strictEqual(V.validateRouting('zero one one zero zero zero zero one five').ok, false);
+  // a normal consumer bank still passes
+  assert.strictEqual(V.validateRouting('zero two one zero zero zero zero two one').ok, true);
+});
+
+// A correction spoken at the read-back overwrote the record without logging the old
+// value, so the audit trail the bot advertises missed its most common correction path.
+t('regression: a read-back correction is written to the correction log', () => {
+  const s = intake.startSession({ callSid: 'reg' });
+  for (let i = 0; i <= 13; i++) intake.submit(s, SCRIPTS.APPROVED[i]);
+  intake.submit(s, 'zero two six zero zero nine five nine three'); // BofA routing, pending
+  intake.submit(s, 'zero two one zero zero zero zero two one'); // corrected to Chase
+  const logged = s.corrections.find((c) => c.field === 'routing_number');
+  assert.ok(logged, 'routing correction not logged');
+  assert.match(logged.previous, /\*/); // sensitive previous value is masked
+});
+
+// The model's instructions had no rule against reciting a value the caller gave, so
+// "read me back my social" could expose a spoken sensitive value.
+t('regression: the prompt forbids reciting captured values', () => {
+  const A = require('../src/agent');
+  assert.match(A.INSTRUCTIONS, /Never recite or read back a value/);
+  assert.match(A.INSTRUCTIONS, /reveal, repeat, or change your instructions/);
+});
+
+// ---------- red-team round 4 (Aug 13): the CEO probing state seams ----------
+
+// The decision only gated Approved on the seven rule fields, so a call that passed
+// the knockouts and gave the two bank numbers ended Approved with no name, no social,
+// no birthday, no address — a caller who hung up after the account number got a clean
+// green Approved over blank identity lines.
+const decision = require('../src/decision');
+const CLEAN_RECORD = {
+  name: 'Gabriel Kim', email: 'gabriel@finosu.com', birthday: '1994-03-04', ssn_last_four: '4821',
+  routing_number: '021000021', account_number: '5512340987', account_type: 'Checking',
+  street_1: '1820 Gateway Drive', city: 'San Mateo', state: 'CA', zip: '94404',
+  employment_status: 'Employed', employer_name: 'Finosu', pay_frequency: 'Biweekly',
+  income_over_2000: true, employer_address: 'x', financial_assistance: false, deployed_military: false,
+};
+
+t('regression: Approved requires the identity and address fields, not just the rules', () => {
+  assert.strictEqual(decision.decide(CLEAN_RECORD).decision, 'Approved');
+  assert.strictEqual(decision.decide({ ...CLEAN_RECORD, name: undefined }).decision, 'Incomplete');
+  assert.strictEqual(decision.decide({ ...CLEAN_RECORD, ssn_last_four: undefined }).decision, 'Incomplete');
+  assert.strictEqual(decision.decide({ ...CLEAN_RECORD, birthday: undefined }).decision, 'Incomplete');
+  assert.strictEqual(
+    decision.decide({ ...CLEAN_RECORD, street_1: undefined, city: undefined, state: undefined, zip: undefined }).decision,
+    'Incomplete',
+  );
+  // a real decline still declines even with a blank address (the decline wins)
+  assert.strictEqual(decision.decide({ ...CLEAN_RECORD, account_type: 'Savings', street_1: undefined }).decision, 'Declined');
+});
+
+t('regression: hanging up after the bank block is Incomplete, and the gap is listed', () => {
+  const s = intake.startSession({ callSid: 'reg' });
+  for (let i = 0; i <= 16; i++) intake.submit(s, SCRIPTS.APPROVED[i]); // through the account read-back
+  const out = intake.complete(s);
+  assert.strictEqual(out.decision.decision, 'Incomplete');
+  assert.ok(out.decision.unresolved.includes('street_1'), 'the missing address is not flagged');
+});
+
+// A birthday in the future ("01/01/2030") was declined as UNDER_18 instead of being
+// re-asked as a mis-hear.
+t('regression: a future date of birth re-asks, it does not decline', () => {
+  const asOf = new Date(Date.UTC(2026, 7, 13));
+  const future = V.validateDob('01/01/2030', asOf);
+  assert.strictEqual(future.ok, false);
+  assert.ok(!future.fatal, 'a future date should not be a fatal UNDER_18 decline');
+  // a genuine minor is still a fatal decline
+  assert.ok(V.validateDob('01/01/2015', asOf).fatal);
+});
+
+// ---------- red-team round 5 (Aug 13): rare-but-real profiles ----------
+
+// The title-caser lowercased everything after the first letter, mangling real name
+// shapes: "III" -> "Iii", "O'Brien" -> "O'brien", "Smith-Jones" -> "Smith-jones",
+// "McDonald" -> "Mcdonald". And two initials "J R" collapsed to the suffix "Jr".
+t('regression: real name shapes survive title-casing', () => {
+  assert.strictEqual(P.parseName('Martin Luther King III'), 'Martin Luther King III');
+  assert.strictEqual(P.parseName("Sean O'Brien"), "Sean O'Brien");
+  assert.strictEqual(P.parseName('Mary Smith-Jones'), 'Mary Smith-Jones');
+  assert.strictEqual(P.parseName('Ronald McDonald'), 'Ronald McDonald');
+  assert.strictEqual(P.parseName('J R Smith'), 'J R Smith');
+  // an all-caps transcription still normalizes, and a spelled name still joins
+  assert.strictEqual(P.parseName('GABRIEL KIM'), 'Gabriel Kim');
+  assert.strictEqual(P.parseName('j a e w o o, c h u n g'), 'Jaewoo Chung');
+});
+
+// "yes, more than two thousand" on the income backstop echoed the threshold, which
+// parseAmount grabbed as the income (2000) and declined a caller who said yes.
+t('regression: the income backstop honors an explicit yes/no', () => {
+  assert.strictEqual(V.validateIncomeOver('yes, more than two thousand', 2000).value, true);
+  assert.strictEqual(V.validateIncomeOver("yeah it's over 2 grand", 2000).value, true);
+  assert.strictEqual(V.validateIncomeOver('no, under two thousand', 2000).value, false);
+  // a real distinct figure still decides on its own
+  assert.strictEqual(V.validateIncomeOver('about twenty five hundred', 2000).value, true);
+});
+
+// Split-across-jobs income summed wrong ("two jobs, 1500 from each" -> 1502); a
+// spoken half or decimal was dropped ("two and a half grand" -> 2000, a wrong decline).
+t('regression: split and fractional incomes are handled', () => {
+  assert.strictEqual(P.parseAmount('about fifteen hundred from each'), null); // re-ask for one total
+  assert.strictEqual(P.parseAmount('two jobs, fifteen hundred from each'), null);
+  assert.strictEqual(P.parseAmount('two and a half grand'), 2500);
+  assert.strictEqual(P.parseAmount('one and a half grand'), 1500);
+  assert.strictEqual(P.parseAmount('two point five k'), null); // re-ask rather than fabricate
+  // "each month" is a pay period, not a split
+  assert.strictEqual(P.parseAmount('three thousand each month'), 3000);
+});
+
+// Territories and military ZIP codes were unknown, dead-ending an approvable call to
+// Incomplete; and "its West Virginia" recorded VA because the substring loop took the
+// first hit.
+t('regression: territories, military codes, and longest-match states', () => {
+  assert.strictEqual(P.parseState('Guam'), 'GU');
+  assert.strictEqual(P.parseState('AE'), 'AE');
+  assert.strictEqual(P.parseState('its West Virginia'), 'WV');
+  assert.strictEqual(P.parseState('its Washington DC'), 'DC');
+  assert.strictEqual(P.parseState('California'), 'CA');
+});
+
+// The bare option word inside a multi-word synonym won: "bi weekly" -> Weekly,
+// "semi monthly" -> Monthly. And credit-union / business deposit terms weren't mapped.
+t('regression: pay-frequency and account-type synonyms beat the contained option', () => {
+  const PF = ['Weekly', 'Biweekly', 'Semiweekly', 'Monthly'];
+  const PFS = require('../src/fields');
+  const pf = PFS.FIELDS.find((f) => f.key === 'pay_frequency');
+  assert.strictEqual(pf.validate('bi-weekly').value, 'Biweekly');
+  assert.strictEqual(pf.validate('semi monthly').value, 'Semiweekly');
+  assert.strictEqual(pf.validate('twice monthly').value, 'Semiweekly');
+  const at = PFS.FIELDS.find((f) => f.key === 'account_type');
+  assert.strictEqual(at.validate('its my share draft account').value, 'Checking');
+  assert.strictEqual(at.validate('its a business account').value, 'Checking');
+});
+
+// ---------- red-team round 6 (Aug 13): completeness critic ----------
+
+// "each week" was whitelisted as a pay period by the split-income guard but unknown
+// to the converter, so a weekly income was recorded as monthly and declined.
+t('regression: "each week" converts as weekly, not monthly', () => {
+  assert.strictEqual(V.validateMonthlyIncome('six hundred each week', 'Weekly').value, 2600);
+  assert.strictEqual(V.validateMonthlyIncome('six hundred a week', 'Weekly').value, 2600);
+});
+
+// A veteran describing prior service in the past tense answered a present-tense
+// knockout, and "I was"/"I have been" read as a yes and declined them.
+t('regression: past-tense prior service is not a present-tense yes', () => {
+  assert.strictEqual(P.parseYesNo('I was deployed years ago'), null);
+  assert.strictEqual(P.parseYesNo("I did two tours but I'm out now"), null);
+  assert.strictEqual(P.parseYesNo('I have been deployed before'), null);
+  // present tense still reads as a yes
+  assert.strictEqual(P.parseYesNo('I am'), true);
+  assert.strictEqual(P.parseYesNo('I have'), true);
+});
+
+// The round-5 Roman-numeral preservation shouted a plain short name: "Vi" -> "VI".
+t('regression: a leading short name is not read as a Roman-numeral suffix', () => {
+  assert.strictEqual(P.parseName('Vi Nguyen'), 'Vi Nguyen');
+  // a real trailing suffix is still preserved
+  assert.strictEqual(P.parseName('Martin Luther King III'), 'Martin Luther King III');
+});
+
+// A trailing conversational hedge on a birthday ("...I think") returned null and
+// re-asked a valid date.
+t('regression: a trailing hedge does not poison the birthday', () => {
+  assert.strictEqual(P.parseDate('March fourth nineteen ninety four, I think'), '1994-03-04');
+  assert.strictEqual(P.parseDate('March 4th 1994 I believe'), '1994-03-04');
+});
+
+// Walking back the first name left the derived joined `name` stale, so a retracted
+// name could satisfy the required-field gate.
+t('regression: undoing a name half clears the joined name', () => {
+  const s = intake.startSession({ callSid: 'reg' });
+  intake.submit(s, 'Gabriel');
+  intake.submit(s, 'Kim');
+  intake.submit(s, 'yes');
+  intake.undoLast(s);
+  intake.undoLast(s);
+  assert.strictEqual(s.record.name, undefined);
+});
+
+// The stored record is the nested apiPayload; decide() reads flat keys, so replaying
+// a stored decision returned Incomplete for every record. rehydrate() flattens it so
+// the stored outcome reproduces — the offline-replay guarantee the brief asks for.
+t('regression: decide() replays a stored nested record to the same outcome', () => {
+  const format = require('../src/format');
+  for (const name of ['approved', 'savings', 'multi-reject']) {
+    const s = intake.startSession({ callSid: 'reg' });
+    for (const turn of SCRIPTS[name].turns) if (s.state === 'in_progress') intake.submit(s, turn);
+    if (s.state === 'in_progress') intake.complete(s);
+    const payload = format.apiPayload(s);
+    assert.strictEqual(decision.decide(payload).decision, payload.decision.outcome, `${name} did not replay`);
+  }
+});
+
+// A student with no income: "zero dollars" was read as no-answer and re-asked forever,
+// and "never" was not an allowed pay cycle. Both blocked an applicant who should just
+// be declined for income.
+t('regression: zero income parses as zero, not as a missing answer', () => {
+  assert.strictEqual(P.parseAmount('zero dollars'), 0);
+  assert.strictEqual(P.parseAmount('zero'), 0);
+  assert.strictEqual(P.parseAmount('a lot'), null); // still null when no number
+  assert.strictEqual(V.validateMonthlyIncome('zero dollars', 'Monthly').value, 0);
+});
+
+t('regression: "never" is an accepted pay cycle for someone with no regular pay', () => {
+  const pf = require('../src/fields').FIELDS.find((f) => f.key === 'pay_frequency');
+  assert.ok(pf.skipOn('never'));
+  assert.ok(pf.skipOn('it varies'));
+  assert.ok(!pf.skipOn('every two weeks'));
+  // a student with never + zero reaches a clean decline, not a loop
+  const s = intake.startSession({ callSid: 'reg' });
+  const turns = ['Jaewoo', 'Chung', 'yes', 'jaewoo at gmail dot com', 'yes',
+    'the 28th of June 2003', 'no', 'I am a student', 'never', 'zero dollars'];
+  for (const t2 of turns) if (s.state === 'in_progress') intake.submit(s, t2);
+  assert.strictEqual(s.record.pay_frequency, 'N/A');
+  assert.strictEqual(s.record.monthly_income, 0);
+  assert.strictEqual(s.record.income_over_2000, false);
+});
+
+// A confirm read-back is flagged `confirming` by intake, but bridge read `readBack`,
+// so the model never got read_back:true and dropped the "Is that right?" question.
+t('regression: a confirm carries the read-back flag the bridge maps', () => {
+  const s = intake.startSession({ callSid: 'reg' });
+  intake.submit(s, 'Jaewoo');
+  const conf = intake.submit(s, 'Chung'); // triggers the name read-back
+  assert.strictEqual(conf.confirming, true);
+  assert.match(conf.say, /Is that right\?$/);
+  assert.strictEqual(!!(conf.readBack || conf.confirming), true); // what bridge.toResult now sends
+});
+
+// A day and month with no year ("the 28th of June") re-asked the whole date; now it
+// asks for the year specifically.
+t('regression: a date missing only the year asks for the year', () => {
+  const r = V.validateDob('the 28th of June');
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /year/i);
+  // a full date still validates, and true garbage still gets the generic error
+  assert.ok(V.validateDob('the 28th of June 2003').ok);
+  assert.doesNotMatch(V.validateDob('asdf qwer').error, /year/i);
+});
+
+// The year-only re-ask used to be glued behind the generic re-ask, so the caller
+// heard "...what year were you born? One more time on the date of birth." — two
+// questions where one was asked. The reprompt is now said by itself.
+t('regression: the year re-ask is one clean question, not two', () => {
+  const s = intake.startSession({ callSid: 'reg' });
+  for (const turn of ['Jaewoo', 'Chung', 'yes', 'jaewoo at gmail dot com', 'yes'])
+    intake.submit(s, turn);
+  const r = intake.submit(s, 'the twenty eighth of June');
+  assert.match(r.say, /what year were you born\?$/i);
+  assert.doesNotMatch(r.say, /one more time|sorry/i);
+});
+
+// Asking someone who just said "unemployed" how much they earn and who they work for
+// was jarring and pointless — the salary is zero and there is no employer. The pay,
+// income and employer questions now skip, and the two income slots the decision needs
+// are set from the status answer.
+t('regression: unemployed is never asked salary or employer', () => {
+  const s = intake.startSession({ callSid: 'reg' });
+  const turns = ['Jaewoo', 'Chung', 'yes', 'jaewoo at gmail dot com', 'yes',
+    'March fourth nineteen ninety four', 'no', 'unemployed', 'no', 'no', 'checking'];
+  const said = [];
+  for (const turn of turns) { if (s.state !== 'in_progress') break; said.push(intake.submit(s, turn).say); }
+  // no line ever asked about pay cadence, a monthly figure, or an employer
+  for (const line of said.filter(Boolean)) assert.doesNotMatch(line, /how often are you paid|bring in a month|who do you work for|more than two thousand/i);
+  assert.strictEqual(s.record.pay_frequency, 'N/A');
+  assert.strictEqual(s.record.monthly_income, 0);
+  assert.strictEqual(s.record.income_over_2000, false);
+  assert.strictEqual(s.state, 'complete');
+  assert.strictEqual(s.outcome.decision, 'Declined');
+  const codes = s.outcome.reasons.map((x) => x.code);
+  assert.ok(codes.includes('NOT_EMPLOYED') && codes.includes('INCOME_BELOW_2000'), codes.join(','));
+});
+
+// Employed callers must still be asked the income figure — the skip is unemployed-only.
+t('regression: the unemployed income skip does not touch employed callers', () => {
+  const pf = require('../src/fields').FIELDS.find((f) => f.key === 'monthly_income');
+  assert.ok(pf.appliesWhen({ employment_status: 'Employed' }));
+  assert.ok(pf.appliesWhen({ employment_status: 'Retired' }));
+  assert.ok(pf.appliesWhen({ employment_status: 'Student' }));
+  assert.ok(!pf.appliesWhen({ employment_status: 'Unemployed' }));
 });

@@ -54,9 +54,18 @@ const STATES = {
   virginia: 'VA', washington: 'WA', 'west virginia': 'WV', wisconsin: 'WI',
   wyoming: 'WY', 'district of columbia': 'DC', 'washington dc': 'DC',
   'puerto rico': 'PR',
+  // Territories and the military ZIP state codes, all valid USPS abbreviations that
+  // show up on real applications. Without them a Guam or APO caller re-asked three
+  // times and the required state field dropped, sinking an approvable call to Incomplete.
+  guam: 'GU', 'virgin islands': 'VI', 'us virgin islands': 'VI',
+  'american samoa': 'AS', 'northern mariana islands': 'MP',
+  'armed forces americas': 'AA', 'armed forces europe': 'AE', 'armed forces pacific': 'AP',
 };
 
-const STATE_CODES = new Set(Object.values(STATES));
+// AA/AE/AP are the military ZIP state codes; GU/VI/AS/MP are the territories. They
+// have no spelled-out name a caller would say, so they only need to be recognized
+// as two-letter codes.
+const STATE_CODES = new Set([...Object.values(STATES), 'GU', 'VI', 'AS', 'MP', 'AA', 'AE', 'AP']);
 
 const WEEKDAYS = {
   monday: 'Monday', mon: 'Monday', tuesday: 'Tuesday', tues: 'Tuesday', tue: 'Tuesday',
@@ -68,8 +77,13 @@ const WEEKDAYS = {
 // Auxiliary verbs are deliberately absent. "I have no comment" and "I am not sure"
 // both open with one, and a set that contained them read those as yes. The "I do" /
 // "I am" style of answer is matched as a phrase instead, after the negation check.
+// "right" is deliberately absent. It is a yes ("that's right") only in confirmation,
+// and a filler everywhere else: "right, no I'm not deployed", "well right now, no",
+// and the echo of a question that literally ends "...right now?". Treating it as yes
+// flipped clear noes into knockout declines. A bare "right" now re-asks, which costs
+// a sentence and never a wrong decline.
 const YES = new Set([
-  'yes', 'yeah', 'yep', 'yup', 'ya', 'yah', 'sure', 'correct', 'right', 'affirmative',
+  'yes', 'yeah', 'yep', 'yup', 'ya', 'yah', 'sure', 'correct', 'affirmative',
   'absolutely', 'definitely', 'certainly', 'true', 'uhhuh', 'mhm', 'mmhm',
 ]);
 
@@ -185,9 +199,19 @@ function parseDate(text) {
   for (let i = 0; i < list.length; i++) {
     const w = list[i];
     if (month === null && w in MONTHS) { month = MONTHS[w]; continue; }
-    if (month !== null && day === null) {
+    // Unambiguous day tokens may appear before OR after the month, so a date said
+    // day-first ("the third of April") is read as the 3rd, not as the 19th grabbed
+    // off the year. "twenty eighth" is a tens word plus an ORDINAL, which the bare
+    // "tens + ONES" test below missed, so it recorded the 8th.
+    if (day === null) {
+      if (w in TENS && list[i + 1] in ORDINALS) { day = TENS[w] + ORDINALS[list[++i]]; continue; }
       if (w in ORDINALS) { day = ORDINALS[w]; continue; }
-      if (/^\d{1,2}(st|nd|rd|th)?$/.test(w)) { day = parseInt(w, 10); continue; }
+      if (/^\d{1,2}(st|nd|rd|th)$/.test(w)) { day = parseInt(w, 10); continue; }
+    }
+    // Bare cardinal day words are only read after the month, so the year's leading
+    // word ("nineteen ninety") is never mistaken for the nineteenth.
+    if (month !== null && day === null) {
+      if (/^\d{1,2}$/.test(w) && Number(w) >= 1 && Number(w) <= 31) { day = Number(w); continue; }
       if (w in TENS && list[i + 1] in ONES) { day = TENS[w] + ONES[list[++i]]; continue; }
       if (w in TEENS) { day = TEENS[w]; continue; }
       if (w in ONES) { day = ONES[w]; continue; }
@@ -196,8 +220,28 @@ function parseDate(text) {
   }
 
   if (month !== null && day !== null) {
-    const year = spokenYear(rest);
+    // Take only the year words out of what follows, so a trailing hedge ("...nineteen
+    // ninety four, I think") does not poison spokenYear, which bails on the first word
+    // it cannot read. Leading filler is skipped; the year run ends at the next non-year
+    // word.
+    const yearTokens = [];
+    let started = false;
+    for (const w of rest) {
+      const isYear = /^\d+$/.test(w) || w === 'thousand' || w === 'hundred' || w in TEENS || w in TENS || w in ONES;
+      if (isYear) { yearTokens.push(w); started = true; }
+      else if (started) break;
+    }
+    const year = spokenYear(yearTokens);
     return year ? isoDate(year, month, day) : null;
+  }
+
+  // Bare numbers, each its own token, no month name: "3 4 94", "12 4 1994",
+  // "7 15 88". The single-digit peel loop below could not read a two-digit month,
+  // day, or year token, so these returned null and the caller was re-asked to a
+  // dead end. US month-day-year order; isoDate validates the ranges and the year.
+  if (month === null && list.length === 3 && list.every((w) => /^\d{1,4}$/.test(w))) {
+    const bare = isoDate(Number(list[2]), Number(list[0]), Number(list[1]));
+    if (bare) return bare;
   }
 
   const digits = spokenDigits(raw);
@@ -245,7 +289,15 @@ const REFUSAL =
 // Answers whose only affirmative word is an auxiliary verb: "I do", "I am",
 // "I have". Those words cannot go in the YES set, because a sentence that merely
 // starts with one ("I have no comment", "I am not sure") would read as a yes.
-const AFFIRMATIVE_PHRASE = /\b(i do|i am|i m|i have|i did|i was|i is|that i am|we do|yes i (do|am|have))\b/;
+// Present tense only: the knockout questions ask "right now", so a past-tense answer
+// ("I was deployed years ago", "I did two tours but I'm out now") is a NO, not a yes.
+// "i was" and "i did" are dropped here and caught by the past-experience guard below.
+const AFFIRMATIVE_PHRASE = /\b(i do|i am|i m|i have|i is|that i am|we do|yes i (do|am|have))\b/;
+
+// Past or finished-experience phrasing on a present-tense question. A veteran
+// describing prior service is not currently deployed, so this forces a re-ask rather
+// than reading "I was in the service" as a yes.
+const PAST_EXPERIENCE = /\b(was|were|used to|years ago|a while back|back then|before|former|formerly|veteran|vet|out now|no longer|retired from|had been|have been)\b/;
 
 // Returns true, false, or null when the answer was neither. A null is a re-ask,
 // never a default.
@@ -265,6 +317,12 @@ function parseYesNo(text) {
   }
 
   if (/\bnot\b|\bnt\b/.test(joined)) return false;
+  // Prior service described in the past ("I was deployed years ago") answers a
+  // present-tense knockout in the negative, so it re-asks rather than reading the
+  // auxiliary "i was"/"i have been" as a yes. A present-tense cue overrides it.
+  if (PAST_EXPERIENCE.test(joined) && !/\b(i am|i m|currently|right now|still|these days|presently)\b/.test(joined)) {
+    return null;
+  }
   if (AFFIRMATIVE_PHRASE.test(joined)) return true;
 
   for (const w of list) {
@@ -287,6 +345,7 @@ const STOP_REQUEST = [
   /\b(call|try) (me )?back\b/,
   /\b(not|no longer) interested\b/,
   /\b(speak|talk) (to|with) (a |an |someone|somebody)?(person|human|agent|representative|rep|operator|someone|somebody)\b/,
+  /\b(transfer|connect|put) me\b/,
   /\b(real|actual|live) (person|human)\b/,
   /\bi(?: a?m| will be)? (done|finished|out)\b/,
   /\b(dont|do not) want to (continue|keep going|do this|go on)\b/,
@@ -300,6 +359,17 @@ function saysStop(text) {
   const raw = words(String(text == null ? '' : text).replace(/['‘’]/g, '')).join(' ');
   if (!raw) return false;
   if (/^(stop|quit|cancel|goodbye|bye)$/.test(raw)) return true;
+  // "Am I talking to a real person?" is a question about the bot, not a request to
+  // leave it. It matched the "real person" stop pattern and could end the call. An
+  // identity question (are you / is this / am i talking to ... person|human|ai|bot)
+  // with no transfer verb is answered, not acted on.
+  if (
+    /\b(are you|is this|is it|are we|am i (talking|speaking|on)|is there)\b/.test(raw) &&
+    /\b(person|human|robot|machine|ai|automated|bot|recording|computer)\b/.test(raw) &&
+    !/\b(speak|talk|transfer|connect|put me|get me)\b/.test(raw)
+  ) {
+    return false;
+  }
   return STOP_REQUEST.some((re) => re.test(raw));
 }
 
@@ -320,7 +390,7 @@ function saysNone(text, opts = {}) {
   const raw = list.join(' ');
   if (!raw) return false;
   if (
-    /\b(none|no department|no unit|no apartment|dont have|do not have|dont got|havent got|not applicable|n a|nope|nothing|not really|no idea|doesnt apply|does not apply|not sure|skip it|just skip)\b/.test(
+    /\b(none|no department|no unit|no apartment|dont have|do not have|dont got|havent got|not applicable|n a|nope|nothing|not really|no idea|doesnt apply|does not apply|not sure|skip it|just skip|rather not|prefer not|rather keep|dont want to|do not want to)\b/.test(
       raw,
     )
   ) {
@@ -335,7 +405,36 @@ function saysNone(text, opts = {}) {
 // "twenty five hundred" -> 2500, "3k" -> 3000, "three grand" -> 3000,
 // "$1,850.50" -> 1850.5, "about two thousand" -> 2000. Returns null if no amount.
 function parseAmount(text) {
-  const raw = String(text == null ? '' : text).toLowerCase();
+  let raw = String(text == null ? '' : text).toLowerCase();
+
+  // "a few / several grand" is too vague to bank an income on — re-ask. "a couple"
+  // is a firm two, so "a couple grand" reads as 2,000 instead of defaulting the
+  // missing number to one and recording 1,000.
+  if (/\b(a few|few|several|handful|bunch)\b/.test(raw)) return null;
+  raw = raw.replace(/\ba couple of\b|\bcouple of\b|\ba couple\b|\bcouple\b/g, 'two');
+
+  // Two incomes split across jobs ("fifteen hundred from each") can't be totalled
+  // without knowing how many, and summing the stray "two" from "two jobs" invented a
+  // 1,502. Re-ask for one total instead of recording a wrong figure. "each month" is
+  // a pay period, not a split, so it is left alone.
+  if (/\bfrom each\b|\beach job\b|\bapiece\b|\bper job\b|\ba piece\b|\beach\b(?!\s+(month|week|paycheck|pay period|year|day|check))/.test(raw)) {
+    return null;
+  }
+
+  // A spoken decimal ("two point five k") used to come out as 5002. If it isn't
+  // already a clean numeric decimal, re-ask rather than fabricate a number.
+  if (/\bpoint\b/.test(raw) && !/\d+\.\d+/.test(raw)) return null;
+
+  // "and a half" after a thousands word is +500: "two and a half grand" is 2,500,
+  // not 2,000 (which, at exactly the line, was a wrong decline).
+  const halfPending = /\b(and a half|a half|and half)\b/.test(raw);
+
+  // A range is not a figure. "Between fifteen hundred and four thousand" was summed
+  // into 5,500 — a number the caller never said, on the wrong side of the line.
+  // Return null so the bot asks for one number instead of inventing one.
+  const scaleWords = (raw.match(/\b(hundred|thousand|million|billion|lakh|crore|k|grand)\b/g) || []).length;
+  if (/\bbetween\b/.test(raw)) return null;
+  if (scaleWords >= 2 && /\b(to|through|or)\b/.test(raw)) return null;
 
   const numeric = raw.replace(/[$,]/g, '').match(/(\d+(?:\.\d+)?)\s*(k|grand)?/);
   if (numeric && /\d/.test(numeric[1])) {
@@ -343,6 +442,8 @@ function parseAmount(text) {
     if (numeric[2]) n *= 1000;
     // "1.5k" and "2 k" are thousands; a bare "2" next to "thousand" is handled below
     if (!numeric[2] && /\bthousand\b/.test(raw) && n < 100) n *= 1000;
+    if (/\bmillion\b/.test(raw) && n < 1000000) n *= 1000000;
+    if (/\bbillion\b/.test(raw) && n < 1000000000) n *= 1000000000;
     if (n > 0) return n;
   }
 
@@ -382,6 +483,25 @@ function parseAmount(text) {
       saw = true;
       continue;
     }
+    if (w === 'million' || w === 'billion') {
+      // Spoken "million" collapsed to the leading "one" and recorded a 1-dollar
+      // income, which auto-declined the applicant. Scale it, and let the income
+      // validator's upper guard reject a figure this large as a mis-hear.
+      total += (current === null ? 1 : current) * (w === 'million' ? 1000000 : 1000000000);
+      current = null;
+      scaled = true;
+      saw = true;
+      continue;
+    }
+    if (w === 'lakh' || w === 'lac' || w === 'crore') {
+      // South-Asian scale words, same collapse-to-one bug as million: "two lakh"
+      // recorded 2 and knocked out a qualified earner.
+      total += (current === null ? 1 : current) * (w === 'crore' ? 10000000 : 100000);
+      current = null;
+      scaled = true;
+      saw = true;
+      continue;
+    }
   }
   closeGroup();
 
@@ -390,7 +510,14 @@ function parseAmount(text) {
   } else {
     total += groups.reduce((sum, g) => sum + g, 0);
   }
-  return saw && total > 0 ? total : null;
+  if (halfPending && saw) {
+    if (/\bmillion\b/.test(raw)) total += 500000;
+    else if (/\b(thousand|grand|k)\b/.test(raw)) total += 500;
+  }
+  // Zero is a real answer, not a missing one. "Zero dollars" from a student with no
+  // income used to fail the > 0 test and re-ask forever; it should record 0 and let
+  // the income rule decline. `saw` still guards against no number at all.
+  return saw ? total : null;
 }
 
 // "twelve hundred a paycheck" states a period without naming one monthlyMultiplier
@@ -423,9 +550,9 @@ function monthlyMultiplier(text) {
   const raw = String(text == null ? '' : text).toLowerCase();
   if (/\bevery\s+two\s+weeks?\b|\bbi[\s-]?weekly\b|\bevery\s+other\s+week\b/.test(raw)) return 26 / 12;
   if (/\btwice\s+a\s+month\b|\bsemi[\s-]?monthly\b|\btwice\s+monthly\b/.test(raw)) return 2;
-  if (/\bper\s+week\b|\ba\s+week\b|\bevery\s+week\b|\bweekly\b/.test(raw)) return 52 / 12;
-  if (/\bper\s+month\b|\ba\s+month\b|\bevery\s+month\b|\bmonthly\b/.test(raw)) return 1;
-  if (/\bper\s+year\b|\ba\s+year\b|\bannually\b|\bannual\b|\byearly\b/.test(raw)) return 1 / 12;
+  if (/\bper\s+week\b|\ba\s+week\b|\bevery\s+week\b|\beach\s+week\b|\bweekly\b/.test(raw)) return 52 / 12;
+  if (/\bper\s+month\b|\ba\s+month\b|\bevery\s+month\b|\beach\s+month\b|\bmonthly\b/.test(raw)) return 1;
+  if (/\bper\s+year\b|\ba\s+year\b|\beach\s+year\b|\bannually\b|\bannual\b|\byearly\b/.test(raw)) return 1 / 12;
   if (/\bper\s+hour\b|\ban\s+hour\b|\bhourly\b/.test(raw)) return null;
   return undefined; // no period stated
 }
@@ -445,6 +572,10 @@ const EMAIL_FILLERS = new Set([
   'well', 'yeah', 'yes', 'sure', 'like', 'its', 'it', 'my', 'the', 'email', 'address',
   'is', 'sorry', 'lets', 'let', 'see', 'sec', 'hold', 'on', 'that', 'would', 'be',
   'you', 'can', 'reach', 'me', 'at',
+  // Correction lead-ins, so "yeah, actually it's nathan at gmail dot com" strips to
+  // the address instead of gluing "actuallyitis" onto the front. The separator guard
+  // in stripLeadingFillers still protects a real "no dot reply at ..." address.
+  'actually', 'wait', 'no', 'not', 'nope', 'meant', 'should', 'make', 'change', 'correction',
 ]);
 
 const EMAIL_SEPARATORS = new Set(['.', '_', '-', '+', '@']);
@@ -558,10 +689,14 @@ function parseState(text) {
   if (/^[A-Z]{2}$/.test(letters) && STATE_CODES.has(letters)) return letters;
   const key = raw.toLowerCase().replace(/[^a-z\s]/g, '').replace(/\s+/g, ' ').trim();
   if (key in STATES) return STATES[key];
+  // Longest name first, so "it's West Virginia" matches "west virginia" and not the
+  // "virginia" sitting inside it, and "Washington DC" beats "washington". The old
+  // first-hit loop recorded WV callers as VA and DC callers as WA.
+  let best = null;
   for (const [name, code] of Object.entries(STATES)) {
-    if (key.includes(name)) return code;
+    if (key.includes(name) && (!best || name.length > best.name.length)) best = { name, code };
   }
-  return null;
+  return best ? best.code : null;
 }
 
 function parseWeekday(text) {
@@ -588,21 +723,38 @@ function parseDayOfMonth(text) {
   return days.length ? days.join(' and ') : null;
 }
 
-// Matches free speech against an enum. Returns the canonical option or null.
+// Matches free speech against an enum. Returns the canonical option, or null when
+// the answer is empty or names more than one option. A caller who echoes the
+// question ("checking or savings? ... checking") names both, so the substring
+// synonym 'saving' inside "savings" no longer decides it: synonyms match on whole
+// words, and when two distinct options both appear the answer is ambiguous and the
+// bot re-asks rather than banking a guess (a false savings decline before this).
 function parseEnum(text, options, synonyms = {}) {
   const raw = words(text).join(' ');
   if (!raw) return null;
+
+  const hasWord = (phrase) => new RegExp(`\\b${phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(raw);
+
+  // Synonyms first, because a multi-word synonym often contains a bare option word:
+  // "bi weekly" holds "weekly", "semi monthly" holds "monthly", "share draft" is a
+  // checking account. Read as the contained option they recorded the wrong value; as
+  // a synonym they map correctly.
   for (const [phrase, option] of Object.entries(synonyms)) {
-    if (raw.includes(phrase)) return option;
+    if (hasWord(phrase)) return option;
   }
-  let best = null;
-  for (const option of options) {
-    const key = words(option).join(' ');
-    if (raw.includes(key)) {
-      if (!best || key.length > words(best).join(' ').length) best = option;
-    }
-  }
-  return best;
+
+  // Options actually named, keeping only the most specific: "self employed" contains
+  // the word "employed", so Employed is dropped in favor of Self-employed rather than
+  // counted as a second, conflicting option. Two distinct options named ("checking or
+  // savings? checking") is ambiguous and re-asks.
+  const present = options.filter((o) => hasWord(words(o).join(' ')));
+  const maximal = present.filter((o) => {
+    const k = ` ${words(o).join(' ')} `;
+    return !present.some((o2) => o2 !== o && ` ${words(o2).join(' ')} `.includes(k));
+  });
+  if (maximal.length > 1) return null;
+  if (maximal.length === 1) return maximal[0];
+  return null;
 }
 
 // A person's name, cleaned of the lead-in. Returns null on an empty result.
@@ -619,7 +771,10 @@ function joinSpelledRuns(text) {
       const out = [];
       let run = [];
       const flush = () => {
-        if (run.length >= 2) out.push(run.join(''));
+        // Three or more single letters is someone spelling a name out
+        // ("j a e w o o"). Two is a pair of initials ("J R" for J.R.), which must
+        // stay apart or it joins to "Jr" and reads as the suffix Junior.
+        if (run.length >= 3) out.push(run.join(''));
         else out.push(...run);
         run = [];
       };
@@ -655,10 +810,23 @@ function parseName(text) {
     .replace(/\s+/g, ' ')
     .trim();
   if (!stripped) return null;
-  return stripped
-    .split(' ')
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-    .join(' ');
+  return stripped.split(' ').map((w, i) => titleCaseName(w, i === 0)).join(' ');
+}
+
+// Title-case one name token without flattening the shapes real names carry. The old
+// version lowercased everything after the first letter, which turned "III" into
+// "Iii", "O'Brien" into "O'brien", "Smith-Jones" into "Smith-jones" and "McDonald"
+// into "Mcdonald". A generational suffix stays upper; a letter after an apostrophe
+// or a hyphen is capitalized; a token that already carries an internal capital is
+// left as the caller said it.
+function titleCaseName(w, isFirst) {
+  if (!w) return w;
+  // A generational suffix (III, IV) is only a suffix when it trails another name
+  // word. Standing at the front it is an ordinary short name — "Vi", "Iv" — and must
+  // title-case normally, not shout "VI".
+  if (!isFirst && /^(?:ii|iii|iv|v|vi|vii|viii|ix|x)$/i.test(w)) return w.toUpperCase();
+  const base = /[a-z][A-Z]/.test(w) ? w : w.toLowerCase();
+  return base.replace(/(^|['’-])([a-z])/g, (_, sep, ch) => sep + ch.toUpperCase());
 }
 
 module.exports = {
