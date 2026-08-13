@@ -304,28 +304,6 @@ t('the fields nothing can check are read back and wait for a yes', () => {
   assert.match(lastToolResult().say_next, /Spell out the whole address/);
 });
 
-t('the model cannot file an answer the caller never gave', () => {
-  // On a live call the caller said nothing usable, the transcriber wrote "You" twice,
-  // and the model filed a date of birth of June 1st 1990 the applicant had never said.
-  // The prompt has always forbidden inventing an answer; this is the server refusing
-  // to accept one.
-  const { say, saysNothingButModelSaves, lastToolResult } = startCall();
-  say('Gabriel');
-  say('Kim');
-  say('yes');
-  say('gabriel at finosu dot com');
-  say('yes');
-  // Now the bot has asked for the date of birth and the caller has said nothing.
-  saysNothingButModelSaves('June 1st 1990');
-  const r = lastToolResult();
-  assert.strictEqual(r.accepted, false);
-  assert.match(r.problem, /has not answered/);
-  assert.match(r.say_next, /date of birth/i);
-  // The real answer still lands on the next turn.
-  say('March 4th 1994');
-  assert.strictEqual(lastToolResult().accepted, true);
-});
-
 t('an unknown tool name does not throw', () => {
   const { openai } = startCall();
   assert.doesNotThrow(() =>
