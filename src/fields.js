@@ -49,6 +49,22 @@ const PAY_FREQUENCY_SYNONYMS = {
   'every other friday': 'Biweekly',
   'twice a month': 'Semiweekly',
   'two times a month': 'Semiweekly',
+  // Two dates in a month IS twice a month, and it is how most semimonthly payrolls
+  // are described. Without these, "the 1st and the 15th of every month" matched the
+  // bare option "every month" and was stored as Monthly, which halves the multiplier
+  // on a per-paycheck figure and declined a caller earning 2,400.
+  '1st and 15th': 'Semiweekly',
+  'first and fifteenth': 'Semiweekly',
+  '1st and the 15th': 'Semiweekly',
+  'first and the fifteenth': 'Semiweekly',
+  '15th and 30th': 'Semiweekly',
+  'fifteenth and thirtieth': 'Semiweekly',
+  '15th and the 30th': 'Semiweekly',
+  'fifteenth and the thirtieth': 'Semiweekly',
+  '15th and the last': 'Semiweekly',
+  'fifteenth and the last': 'Semiweekly',
+  'middle and end of the month': 'Semiweekly',
+  'twice per month': 'Semiweekly',
   'twice monthly': 'Semiweekly',
   'semi monthly': 'Semiweekly',
   'semimonthly': 'Semiweekly',
@@ -245,9 +261,13 @@ const FIELDS = [
     label: 'If I am deployed military',
     group: 'Eligibility',
     ask: 'Are you active duty military on deployment right now, or a dependent of someone who is?',
-    reask: 'Yes or no, are you deployed right now?',
+    // The re-ask has to carry the dependent half too. Shortened to "are you deployed
+    // right now?", it asked a narrower question than the rule covers, so a spouse of
+    // a deployed servicemember answered no truthfully and was approved against a
+    // reject rule that names them.
+    reask: 'Yes or no: are you deployed right now, or is your spouse or parent?',
     knockout: true,
-    validate: (said) => V.validateYesNo(said),
+    validate: (said) => V.validateDeployed(said),
   },
   {
     key: 'financial_assistance',

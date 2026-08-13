@@ -49,7 +49,11 @@ t('regression: "prefer not to say" is a re-ask, not a no', () => {
 // affirmative, so "I have no comment" recorded a yes on the assistance question.
 t('regression: "I have no comment" is not a yes', () => {
   assert.strictEqual(P.parseYesNo('I have no comment'), null);
-  assert.strictEqual(P.parseYesNo('I am not sure what you mean'), false);
+  // Was asserted as false. A caller who does not understand the question has not
+  // answered it in the negative, and reading it as one settled a screening rule from
+  // an answer nobody gave — the same fault this file's refusal cases exist for. It
+  // re-asks now.
+  assert.strictEqual(P.parseYesNo('I am not sure what you mean'), null);
   assert.strictEqual(P.parseYesNo('I do not receive anything'), false);
 });
 

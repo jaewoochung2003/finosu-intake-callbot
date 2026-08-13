@@ -191,6 +191,43 @@ function bareYesNeedsValue(said, ask) {
   return { ok: false, reprompt: ask };
 }
 
+// The deployment question asks two things at once: are you deployed, or are you a
+// dependent of someone who is. Both are the same reject rule, and a caller answers
+// the pair in one sentence — "no, but my husband is deployed". The plain yes/no
+// reader takes the leading no and records false, so the dependent half of the rule
+// never fired and the applicant was approved.
+//
+// A stated deployment anywhere in the answer settles it as a yes, whatever the
+// leading word was. Past service is excluded because a veteran describing prior
+// deployment is not currently deployed; that guard already lives in parseYesNo, so a
+// past-tense sentence falls through to it rather than being read here.
+const DEPLOYED_OTHER =
+  /\b(husband|wife|spouse|partner|fiance|fiancee|boyfriend|girlfriend|mother|father|mom|dad|parent|son|daughter|kid|child)\b/;
+const IS_DEPLOYED_NOW =
+  /\b(deployed|on deployment|overseas|active duty|stationed|serving|in the service|on tour|tdy|pcs)\b/;
+const PAST_SERVICE = /\b(was|were|used to|years ago|no longer|out now|former|formerly|veteran|retired from|got out|came back|came home)\b/;
+
+// Someone stating their veteran status is telling you they are NOT deployed. The
+// plain reader got this backwards: parseYesNo treats "i am" as an affirmative and
+// lets a present-tense cue override its own past-service guard, so "I am a veteran"
+// came back yes and declined a veteran under the deployed-military rule.
+const VETERAN_STATUS =
+  /\b(veteran|vet|ex military|former (military|service|soldier|marine)|retired (from )?(the )?(military|service|army|navy|marines|air force|guard))\b/;
+
+function validateDeployed(said) {
+  const text = String(said == null ? '' : said).toLowerCase();
+  if (VETERAN_STATUS.test(text) && !IS_DEPLOYED_NOW.test(text)) return { ok: true, value: false };
+  if (
+    DEPLOYED_OTHER.test(text) &&
+    IS_DEPLOYED_NOW.test(text) &&
+    !PAST_SERVICE.test(text) &&
+    !/\b(not|nt|never)\s+(deployed|on deployment|active)\b/.test(text)
+  ) {
+    return { ok: true, value: true };
+  }
+  return validateYesNo(said);
+}
+
 function validateName(said) {
   const name = P.parseName(said);
   if (!name) return { ok: false, error: 'I did not catch a name' };
@@ -402,7 +439,12 @@ function validateMonthlyIncome(said, payFrequency) {
     if (P.perPaycheck(said)) {
       // "twelve hundred a paycheck" means whatever their pay cycle is, which the
       // call has already asked. Without a cycle there is nothing to convert by.
-      if (!payFrequency) {
+      // "N/A" counts as no cycle, not as a cycle of one. The guard only tested for a
+      // missing value, so a caller whose pay frequency was skipped or given up on
+      // reached here with the string "N/A", frequencyMultiplier fell back to 1, and
+      // "twelve hundred a paycheck" was recorded as 1,200 a month. Someone paid 1,200
+      // every two weeks earns 2,600 and was declined on a number they never said.
+      if (!payFrequency || payFrequency === 'N/A') {
         return { ok: false, error: 'I need to know how often you are paid first' };
       }
       mult = frequencyMultiplier(payFrequency);
@@ -514,6 +556,7 @@ module.exports = {
   validateState,
   validateText,
   validateYesNo,
+  validateDeployed,
   validateEnum,
   validateMonthlyIncome,
   validateIncomeOver,

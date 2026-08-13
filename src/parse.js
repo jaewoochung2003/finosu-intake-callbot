@@ -301,6 +301,17 @@ function ageOn(isoBirth, asOf) {
 const REFUSAL =
   /\b(rather not|prefer not|d rather|decline to|declining to|not comfortable|none of your|not saying|no comment|not answering|dont want to say|do not want to say|dont wanna say|why do you need|do i have to|is that required|skip that|skip this|pass on that|next question)\b/;
 
+// Not knowing is not answering no. "I don't know", "not sure" and "no idea" all carry
+// a negation word, so the leading-word scan recorded false and a screening question
+// was settled from an answer the caller never gave — the same fault the refusal list
+// above exists for, and on the same five questions. This runs in the same place, ahead
+// of the word scan, so the negation inside the phrase cannot win first.
+//
+// A hedged no ("probably not", "I don't think so") stays a no. The line is between a
+// caller leaning one way and a caller telling you they cannot answer.
+const DONT_KNOW =
+  /\b(dont know|do not know|dunno|no idea|not sure|unsure|not certain|no clue|couldnt tell you|could not tell you|cant say|cannot say|hard to say|beats me|have to check|would have to check|let me check|need to check|not positive)\b/;
+
 // Answers whose only affirmative word is an auxiliary verb: "I do", "I am",
 // "I have". Those words cannot go in the YES set, because a sentence that merely
 // starts with one ("I have no comment", "I am not sure") would read as a yes.
@@ -333,6 +344,7 @@ function parseYesNo(text) {
   const joined = list.join(' ');
 
   if (REFUSAL.test(joined)) return null;
+  if (DONT_KNOW.test(joined)) return null;
 
   // A leading "no" or "yes" wins over anything later in the sentence:
   // "no, I'm not on any assistance" is a no.
@@ -611,12 +623,23 @@ const PERIOD_TO_MONTHLY = {
 // compared against a monthly threshold. Returns a multiplier or null.
 function monthlyMultiplier(text) {
   const raw = String(text == null ? '' : text).toLowerCase();
-  if (/\bevery\s+two\s+weeks?\b|\bbi[\s-]?weekly\b|\bevery\s+other\s+week\b/.test(raw)) return 26 / 12;
+  // Hourly is checked FIRST, because it is the one period this form cannot convert
+  // and it usually arrives with a second period word attached. Read in the old order,
+  // "twenty dollars an hour a week" took the weekly multiplier and applied it to the
+  // RATE, recording 87 dollars a month and declining someone earning about 3,500.
+  // The form does not ask how many hours anyone works, so an hourly answer is a
+  // re-ask whatever else is in the sentence.
+  if (/\bper\s+hour\b|\ban\s+hour\b|\bhourly\b|\ba\s+hour\b|\b(\d+)\s*\/\s*h(r|our)?\b/.test(raw)) return null;
+  // Same for a daily rate: 200 a day is 4,340 a month on work days and 6,000 on
+  // calendar days, and nothing in the answer says which. Guessing either one moves a
+  // caller across the line, so it asks for a monthly figure instead.
+  if (/\bper\s+day\b|\ba\s+day\b|\bdaily\b|\beach\s+day\b|\bper\s+diem\b/.test(raw)) return null;
+  if (/\bevery\s+two\s+weeks?\b|\bbi[\s-]?weekly\b|\bevery\s+other\s+week\b|\ba\s+fortnight\b|\bfortnightly\b/.test(raw)) return 26 / 12;
   if (/\btwice\s+a\s+month\b|\bsemi[\s-]?monthly\b|\btwice\s+monthly\b/.test(raw)) return 2;
   if (/\bper\s+week\b|\ba\s+week\b|\bevery\s+week\b|\beach\s+week\b|\bweekly\b/.test(raw)) return 52 / 12;
   if (/\bper\s+month\b|\ba\s+month\b|\bevery\s+month\b|\beach\s+month\b|\bmonthly\b/.test(raw)) return 1;
-  if (/\bper\s+year\b|\ba\s+year\b|\beach\s+year\b|\bannually\b|\bannual\b|\byearly\b/.test(raw)) return 1 / 12;
-  if (/\bper\s+hour\b|\ban\s+hour\b|\bhourly\b/.test(raw)) return null;
+  if (/\bper\s+quarter\b|\ba\s+quarter\b|\bquarterly\b|\beach\s+quarter\b/.test(raw)) return 1 / 3;
+  if (/\bper\s+year\b|\ba\s+year\b|\beach\s+year\b|\bannually\b|\bannual\b|\byearly\b|\bper\s+annum\b/.test(raw)) return 1 / 12;
   return undefined; // no period stated
 }
 
@@ -763,7 +786,13 @@ function parseState(text) {
 }
 
 function parseWeekday(text) {
-  for (const w of words(text)) if (w in WEEKDAYS) return WEEKDAYS[w];
+  for (const w of words(text)) {
+    if (w in WEEKDAYS) return WEEKDAYS[w];
+    // "I get paid Fridays" is the ordinary answer to "which day of the week", and the
+    // plural matched nothing, so it failed three times and left Pay Frequency Day
+    // blank on an otherwise complete application.
+    if (w.endsWith('s') && w.slice(0, -1) in WEEKDAYS) return WEEKDAYS[w.slice(0, -1)];
+  }
   return null;
 }
 
