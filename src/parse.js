@@ -185,11 +185,22 @@ function isoDate(y, m, d) {
 function parseDate(text) {
   const raw = String(text == null ? '' : text);
 
-  const iso = raw.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
-  if (iso) return isoDate(Number(iso[1]), Number(iso[2]), Number(iso[3]));
-
-  const slash = raw.match(/(\d{1,2})\s*[/\-.]\s*(\d{1,2})\s*[/\-.]\s*(\d{2,4})/);
-  if (slash) return isoDate(Number(slash[3]), Number(slash[1]), Number(slash[2]));
+  // Three numbers with any separator, in either order. Year-first is a real way to
+  // say a date and it used to fail outright: "1974/5/4" matched neither the old ISO
+  // pattern (which demanded hyphens) nor the old month-first pattern (which demanded
+  // a one or two digit month), and "74-5-4" matched month-first and came out as month
+  // 74, which is nothing. A caller reading their birthday year-first was re-asked to a
+  // dead end. The leading number decides the order: it can only be a year if it is
+  // four digits or larger than any day of the month.
+  const three = raw.match(/(\d{1,4})\s*[/\-.]\s*(\d{1,2})\s*[/\-.]\s*(\d{1,4})/);
+  if (three) {
+    const a = Number(three[1]);
+    const b = Number(three[2]);
+    const c = Number(three[3]);
+    const yearFirst = three[1].length === 4 || a > 31;
+    const hit = yearFirst ? isoDate(a, b, c) : isoDate(c, a, b);
+    if (hit) return hit;
+  }
 
   const list = words(raw);
   let month = null;
@@ -240,7 +251,11 @@ function parseDate(text) {
   // day, or year token, so these returned null and the caller was re-asked to a
   // dead end. US month-day-year order; isoDate validates the ranges and the year.
   if (month === null && list.length === 3 && list.every((w) => /^\d{1,4}$/.test(w))) {
-    const bare = isoDate(Number(list[2]), Number(list[0]), Number(list[1]));
+    // Same either-order rule as the separator form above: "1974 5 4" is year first.
+    const yearFirst = list[0].length === 4 || Number(list[0]) > 31;
+    const bare = yearFirst
+      ? isoDate(Number(list[0]), Number(list[1]), Number(list[2]))
+      : isoDate(Number(list[2]), Number(list[0]), Number(list[1]));
     if (bare) return bare;
   }
 

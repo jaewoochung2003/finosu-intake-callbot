@@ -283,8 +283,14 @@ function handleCall(twilioWs, opts = {}) {
           // reported not hearing "Are you still there?" on a call where the log showed
           // the bot saying it. Frames are what actually went down the wire, so a line
           // logged with 0 frames is a line nobody heard.
+          // Frames alone cannot tell a whole sentence from a truncated one, so the
+          // seconds of audio go next to them. u-law at 8 kHz is 8000 bytes a second
+          // and the payload is base64, so three bytes of audio arrive as four
+          // characters. Compare the seconds against how long the line takes to say:
+          // a read-back that logs 1.2s did not deliver its question.
+          const seconds = ((bytesThisLine * 3) / 4 / 8000).toFixed(1);
           const carried = framesThisLine > 0
-            ? `[${framesThisLine} frames]`
+            ? `[${framesThisLine} frames, ${seconds}s audio]`
             : `[NO AUDIO SENT${droppedThisLine ? `, ${droppedThisLine} deltas dropped, no stream` : ''}]`;
           log(session.callSid, 'bot:', spoken.slice(0, 160), carried);
           framesThisLine = 0;

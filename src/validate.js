@@ -266,6 +266,17 @@ function validateDob(said, asOf) {
         reprompt: 'I have the month and day. What year were you born?',
       };
     }
+    // The mirror of the case above: a year on its own. A caller who answers "1974"
+    // has given a third of the answer and heard "that did not come through as a
+    // date", which is both wrong and useless, since the fix is to name the month and
+    // day rather than to say the whole thing again.
+    if (/^\s*(19|20)?\d{2}\s*$/.test(String(said)) && P.parseDate(`1 1 ${said}`)) {
+      return {
+        ok: false,
+        error: 'I have the year, what month and day were you born?',
+        reprompt: 'I have the year. What month and day?',
+      };
+    }
     return { ok: false, error: 'that did not come through as a date' };
   }
   const age = P.ageOn(iso, asOf);
@@ -274,7 +285,24 @@ function validateDob(said, asOf) {
   if (age < 0) return { ok: false, error: 'that date is in the future' };
   if (age < 18) return { ok: false, error: 'applicants have to be eighteen or older', fatal: true };
   if (age > 110) return { ok: false, error: 'that date of birth is not possible' };
-  return { ok: true, value: iso, note: `age ${age}` };
+  // Say the DATE back, not the age. The note is spoken to the caller, and "age 52"
+  // is a fragment that told a caller nothing about whether the date was heard right —
+  // on a live call it came out as "age 52. Do you want texts going to a different
+  // number?" after two failed attempts, so the one answer most likely to be wrong was
+  // the one never read back. The age stays in the record; the caller hears the date.
+  return { ok: true, value: iso, note: `Got it, ${spellDate(iso)}.`, age };
+}
+
+// "1974-05-04" -> "May 4th, 1974". The date read aloud the way a person says it, so a
+// misheard month or year is audible.
+const MONTH_NAMES = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+function spellDate(iso) {
+  const [y, m, d] = String(iso).split('-').map(Number);
+  const nth = d % 10 === 1 && d !== 11 ? 'st' : d % 10 === 2 && d !== 12 ? 'nd' : d % 10 === 3 && d !== 13 ? 'rd' : 'th';
+  return `${MONTH_NAMES[m - 1]} ${d}${nth}, ${y}`;
 }
 
 function validateSsn4(said) {
@@ -479,6 +507,7 @@ module.exports = {
   spellDigits,
   validateEmail,
   validateDob,
+  spellDate,
   validateSsn4,
   validatePhone,
   validateZip,
