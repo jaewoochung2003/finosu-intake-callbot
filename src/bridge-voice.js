@@ -122,9 +122,18 @@ function earSession(model) {
             type: 'server_vad',
             threshold: 0.6,
             prefix_padding_ms: 300,
-            // Long enough that somebody reading a nine digit routing number out loud
-            // is not cut in half between the groups of digits.
-            silence_duration_ms: 900,
+            // How long the caller has to stop for before the turn is called over.
+            // It is the first of the three waits between them finishing a sentence
+            // and hearing the next one, and the only one that is a setting rather
+            // than someone else's round trip, so it is where a quarter of a second
+            // comes from.
+            //
+            // It was 900, on the reasoning that somebody reading a nine digit routing
+            // number out loud pauses between the groups. They do, and at 650 a slow
+            // reader gets cut off part way — but digits spoken across several turns
+            // are added up against the length the field expects, so a chopped number
+            // finishes on the next turn instead of failing.
+            silence_duration_ms: Number(process.env.VAD_SILENCE_MS || 650),
             create_response: false,
             interrupt_response: false,
           },
@@ -159,6 +168,9 @@ function handleCall(twilioWs, opts = {}) {
   // microphone is shut while any are outstanding.
   let unplayedBatches = 0;
   let speakingSince = 0;
+  // For the wait breakdown in the log.
+  let stoppedTalkingAt = 0;
+  let transcriptAt = 0;
   // One line at a time, in the order they were written. Speaking is asynchronous —
   // the audio is fetched while the call runs — so without a queue a line written
   // during another line's fetch would race it onto the wire.
@@ -215,6 +227,8 @@ function handleCall(twilioWs, opts = {}) {
     speakingSince = Date.now();
     let frames = 0;
     try {
+      const askedAt = Date.now();
+      let firstFrameAt = 0;
       const stream = speakOverride
         ? speakOverride(text)
         : voice.speechStream(text, { apiKey: openaiApiKey });
@@ -242,15 +256,24 @@ function handleCall(twilioWs, opts = {}) {
       };
       for await (const payload of stream) {
         if (finished || !streamSid) break;
+        if (!firstFrameAt) firstFrameAt = Date.now();
         batch.push(payload);
         if (batch.length >= (frames === 0 ? FIRST_BATCH_FRAMES : FRAMES_PER_BATCH)) flush();
       }
       flush();
+      // Where the wait went, when this line is a reply to something the caller said.
+      const waited =
+        stoppedTalkingAt && transcriptAt >= stoppedTalkingAt
+          ? ` [wait ${((firstFrameAt || Date.now()) - stoppedTalkingAt) / 1000}s` +
+            ` = vad+asr ${((transcriptAt - stoppedTalkingAt) / 1000).toFixed(2)}` +
+            ` + speech ${(((firstFrameAt || Date.now()) - askedAt) / 1000).toFixed(2)}]`
+          : '';
+      stoppedTalkingAt = 0;
       log(
         session.callSid,
         'bot:',
         V.redact(openKey(), text).slice(0, 160),
-        `[${frames} frames, ${(frames * 0.02).toFixed(1)}s]`,
+        `[${frames} frames, ${(frames * 0.02).toFixed(1)}s]${waited}`,
       );
     } catch (e) {
       // The line could not be turned into audio. Say so in the log rather than
@@ -327,6 +350,7 @@ function handleCall(twilioWs, opts = {}) {
       // invented answer is not reachable from here.
       case 'conversation.item.input_audio_transcription.completed': {
         const said = String(msg.transcript || '').trim();
+        transcriptAt = Date.now();
         lastActivity = Date.now();
         nudged = false;
         if (!said) break;
@@ -339,7 +363,18 @@ function handleCall(twilioWs, opts = {}) {
       }
 
       case 'input_audio_buffer.speech_started':
+        lastActivity = Date.now();
+        nudged = false;
+        break;
+
+      // The caller stopped talking. From here to the first sound of the reply is the
+      // wait they actually feel, and it is three things stacked: the silence the voice
+      // detector waits out before calling the turn over, the transcriber's round trip,
+      // and the speech endpoint's. Only the first is a setting. The other two are
+      // somebody else's round trip and the only honest thing to do with them is
+      // measure them, so the log carries both rather than a guess.
       case 'input_audio_buffer.speech_stopped':
+        stoppedTalkingAt = Date.now();
         lastActivity = Date.now();
         nudged = false;
         break;

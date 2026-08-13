@@ -38,8 +38,14 @@ const SPEECH_URL = 'https://api.openai.com/v1/audio/speech';
 // TTS_MODEL=gpt-4o-mini-tts puts it back with its style instructions attached.
 const TTS_MODEL = process.env.TTS_MODEL || 'tts-1';
 const TTS_VOICE = process.env.TTS_VOICE || 'alloy';
-// Only tts-1 and tts-1-hd apply it, and 1.0 is already a natural pace.
-const TTS_SPEED = Number(process.env.TTS_SPEED || 1);
+// Pace. tts-1 and tts-1-hd apply this; the gpt-4o voices do not, dependably.
+//
+// 1.0 is the model's natural pace and came back a shade brisk for somebody being
+// asked to find a bank statement, so it sits a little under. It is worth knowing that
+// one request is not a measurement: generation varies enough that 0.95 can come back
+// longer than 1.0 on a single sample. The trend across a few tenths is real, the gap
+// between two neighbouring values is not. Turn TTS_SPEED in .env by 0.05 at a time.
+const TTS_SPEED = Number(process.env.TTS_SPEED || 0.9);
 // Which models take a free-text delivery note. The older ones reject the field.
 const TAKES_INSTRUCTIONS = /^gpt-/.test(TTS_MODEL);
 

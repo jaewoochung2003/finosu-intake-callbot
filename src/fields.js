@@ -288,7 +288,7 @@ const FIELDS = [
     // parser still understands "twelve hundred a paycheck" if a caller volunteers it,
     // because they do, but offering it made the question two questions long and gave
     // the caller a choice to make before answering.
-    ask: 'And roughly how much do you bring in a month? A ballpark is fine.',
+    ask: 'And roughly how much do you bring in a month?',
     reask: 'A rough dollar figure is all I need.',
     knockout: true,
     // Skipped for the unemployed: employment_status already set this to 0. No skipValue,
