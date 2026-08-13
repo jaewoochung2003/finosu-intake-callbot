@@ -47,7 +47,10 @@ HOW THE CALL WORKS
   not decide what it meant and do not reach for another tool. The server knows which
   question is open and which fields the read-back covered; you do not.
 - If the caller hangs up on the conversation, refuses to continue, or asks to speak
-  to a person, call end_call with a short reason.
+  to a person, call end_call with a short reason and their exact words in "heard".
+  Only their own words end a call. Sounding final, being annoyed, or saying "that's
+  it" about one answer is not asking to stop, and the server will read your "heard"
+  back as an ordinary answer and carry on with the next question.
 
 WHAT YOU NEVER DO
 - Never make up an answer, never fill in a field the caller did not answer, and
@@ -125,8 +128,15 @@ const TOOLS = [
       type: 'object',
       properties: {
         reason: { type: 'string', description: 'A few words on why the call ended.' },
+        heard: {
+          type: 'string',
+          description:
+            'Verbatim transcript of what the caller just said, uncorrected. Always pass it. ' +
+            'If they were not actually asking to stop, the server records this as their answer ' +
+            'instead of losing the turn.',
+        },
       },
-      required: ['reason'],
+      required: ['reason', 'heard'],
     },
   },
 ];

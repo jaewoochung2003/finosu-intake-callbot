@@ -355,11 +355,17 @@ function handleCall(twilioWs, opts = {}) {
           'after: ' +
             JSON.stringify(V.redact(open ? open.key : '', String(lastCallerSaid).slice(0, 60))),
         );
-        result = {
-          accepted: false,
-          problem: 'the caller did not ask to stop',
-          say_next: intake.nextPrompt(session),
-        };
+        // Refusing the hang-up is not enough on its own. Reaching for this tool
+        // instead of save_answer also threw the turn away, so a caller who answered
+        // the question and happened to sound final ("that's all I've got, 22046")
+        // heard the same question again with their answer gone. Same fault that let
+        // redo_previous destroy the word "Joe": a tool that carries no words can only
+        // be as good as the model's guess about what they meant. Put the words back
+        // through the normal turn and let the validators decide.
+        const said = String(args.heard || '').trim() || String(lastCallerSaid || '').trim();
+        result = said
+          ? toResult(intake.submit(session, said))
+          : { accepted: false, problem: 'the caller did not ask to stop', say_next: intake.nextPrompt(session) };
       } else {
         log(session.callSid, 'caller ended:', args.reason);
         result = toResult(intake.complete(session));

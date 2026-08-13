@@ -515,10 +515,27 @@ t('end_call is refused when the caller only answered no', () => {
   endCall(call, 'caller refused to continue');
   const r = call.lastToolResult();
   assert.strictEqual(r.accepted, false);
-  assert.match(r.problem, /did not ask to stop/);
-  // and the call is still going, on the question it was already on
-  assert.match(r.say_next, /email address/);
+  // The call is still going, on the question it was already on. The refusal used to
+  // stop there and throw the turn away; the caller's word now goes through the normal
+  // turn instead, so "No." is treated as a failed answer to the open question rather
+  // than vanishing. Either way the call must not end and no report may go out.
+  assert.match(r.say_next, /email/i);
   assert.strictEqual(call.emails.length, 0, 'a refused end_call must not send the report');
+});
+
+t('a refused end_call records the turn instead of losing it', () => {
+  // Reaching for end_call instead of save_answer used to cost the caller their turn:
+  // the hang-up was refused and the words were dropped, so the bot asked the same
+  // question again with nothing recorded.
+  const call = startCall();
+  call.say('Gabriel');
+  call.say('Kim');
+  call.say('yes');
+  hears(call, 'gabriel at finosu dot com');
+  endCall(call, 'caller sounded finished');
+  assert.strictEqual(call.emails.length, 0, 'a refused end_call must not send the report');
+  const r = call.lastToolResult();
+  assert.ok(/is that right/i.test(r.say_next), `the address was not captured: ${r.say_next}`);
 });
 
 t('end_call goes through when the caller asks to stop', () => {
