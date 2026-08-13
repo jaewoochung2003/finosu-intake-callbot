@@ -487,17 +487,38 @@ t('an extra digit on a full field does not start a buffer on the next one', asyn
   assert.match(said, /JPMORGAN CHASE/i, 'the routing number did not land cleanly');
 });
 
-t('a spoken answer that moves the form on discards a stale keypad buffer', () => {
+t('while digits are being typed the keypad owns the question', () => {
+  // Nothing the model reports may be saved against a question with a live entry on
+  // it. This was once a comparison — refuse the save only if its digits match the
+  // buffer — and transcription lags the tones, so the model reported four digits while
+  // three were buffered, the comparison missed, and the answer was filed. The form
+  // advanced under a live entry and the caller's four typed digits went nowhere.
+  const call = startCall();
+  walkTo(call, SCRIPTS.INDEX.ssn);
+  call.press('48');                       // mid-entry
+  call.say('four eight two one');         // the model reporting the tones, running ahead
+  const r = call.lastToolResult();
+  assert.strictEqual(r.accepted, false);
+  assert.match(r.problem, /keypad/i, 'a save landed on a question with a live entry');
+  assert.match(r.say_next, /social security/i, 'the form advanced under the entry');
+
+  // The rest of the digits complete the entry against the question they started on.
+  call.press('21');
+  const spoken = call.openai.ofType('response.create').map((m) => m.response.instructions).join(' ');
+  assert.match(spoken, /routing number/i, 'the completed entry did not move the form on');
+});
+
+t('star clears a half-typed entry so the caller can speak instead', () => {
+  // The way out for someone who starts typing and changes their mind. The question
+  // already offers it, and it is what keeps the rule above from trapping anyone.
   const call = startCall();
   walkTo(call, SCRIPTS.INDEX.routing);
-  call.press('0210'); // starts typing the routing number, does not finish
-  call.say('zero two one zero zero zero zero two one'); // then says it instead
-  // The idle timer would otherwise commit "0210" against the account number.
+  call.press('0210');
+  call.press('*');
+  call.say('zero two one zero zero zero zero two one');
   const r = call.lastToolResult();
-  assert.strictEqual(r.accepted, true);
+  assert.strictEqual(r.accepted, true, 'the spoken answer was refused after a clear');
   assert.match(r.say_next, /Is that right\?$/);
-  call.say('yes');
-  assert.match(call.lastToolResult().say_next, /account number/i);
 });
 
 // ---------- end of call ----------

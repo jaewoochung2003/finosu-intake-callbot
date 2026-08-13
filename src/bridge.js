@@ -425,11 +425,20 @@ function handleCall(twilioWs, opts = {}) {
   // answer that is the digits already in the buffer, and nothing more, is the tones
   // coming back: type 0-2-1-0 and hear "zero two one zero", not "zero two one zero
   // zero zero zero two one".
-  const echoesKeypad = (answer) => {
-    if (!dtmfBuffer) return false;
-    const spoken = P.spokenDigits(String(answer ?? ''));
-    return !!spoken && dtmfBuffer.startsWith(spoken);
-  };
+  // While digits are being typed, the keypad owns the question. Nothing the model
+  // reports may be saved against it.
+  //
+  // This was briefly a comparison: refuse the save only when its digits match what is
+  // in the buffer. Transcription lags the tones, so the model reported four digits
+  // while three were buffered, the comparison missed, the answer was filed, and the
+  // form advanced UNDER a live entry. The caller's fourth digit then went to the next
+  // question and the whole entry was dropped as stale — typing four digits for a
+  // social security number did nothing at all, twice.
+  //
+  // A caller who starts typing and then decides to speak presses star, which the
+  // question already offers, or waits for the re-ask. That costs a rare caller one
+  // turn. The comparison cost every caller their entry.
+  const keypadOwnsTheTurn = () => dtmfBuffer.length > 0;
 
   function onToolCall(callId, name, argsJson) {
     if (!callId || handledCalls.has(callId)) return;
@@ -453,7 +462,7 @@ function handleCall(twilioWs, opts = {}) {
           problem: 'Sorry, I did not catch that',
           say_next: intake.nextPrompt(session),
         };
-      } else if ((echoesKeypad(args.answer) || Date.now() < suppressSavesUntil) && !session.pending) {
+      } else if ((keypadOwnsTheTurn() || Date.now() < suppressSavesUntil) && !session.pending) {
         // The model hears the touch tones as audio and writes them down as words. The
         // window after a committed entry caught that, but nothing covered the entry
         // itself, so a caller typing a routing number while the question was still
@@ -724,12 +733,26 @@ function handleCall(twilioWs, opts = {}) {
       typing = true;
     }
 
-    // Remember which question the digits are for. The idle timer fires later, and
-    // by then a spoken answer may have moved the form on; digits typed for the
-    // routing number must not land in the account number.
+    // The entry belongs to the question it started on, and so does its length.
+    //
+    // Both were re-read on every press. When the form advanced mid-entry, the length
+    // check started reading the NEXT question's: three digits into a four digit social
+    // security number the form moved to the nine digit routing number, so the fourth
+    // digit never completed anything, the entry ran on to eight digits and was thrown
+    // away at the end as belonging to a question that had passed. Typing four digits
+    // did nothing at all.
+    //
+    // If the form does move under a live entry, the entry starts again against the new
+    // question rather than half-belonging to the old one.
     if (!dtmfBuffer) dtmfField = field.key;
+    if (dtmfField !== field.key) {
+      log(session.callSid, `keypad: the form moved to ${field.key} mid-entry, starting over`);
+      dtmfBuffer = '';
+      dtmfField = field.key;
+    }
+    const expected = intake.BY_KEY[dtmfField].dtmf;
     dtmfBuffer += digit;
-    if (dtmfBuffer.length >= field.dtmf) {
+    if (dtmfBuffer.length >= expected) {
       commitDtmf();
       return;
     }
