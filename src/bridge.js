@@ -62,6 +62,13 @@ const CLOSE_MAX_MS = 15000;
 // last, so a lost play-completion mark can never leave the caller unheard. Longer than
 // the longest line (the greeting), short enough that a real stuck queue self-heals.
 const MAX_DEAF_MS = 25000;
+// How much of the bot line may still be playing when the mic opens. People answer on
+// the last syllable, and a mic that waited for the final byte clipped the front of
+// the reply or lost it, so the caller repeated themselves into a bot that had already
+// moved on. 100 ms at 8 kHz u-law is 800 bytes. Raise it and the bot starts hearing
+// its own tail on a speakerphone; drop it to 0 for the old behaviour.
+const MIC_LEAD_MS = 100;
+const MIC_LEAD_BYTES = Math.round((8000 * MIC_LEAD_MS) / 1000);
 // A quiet line. The first is a nudge, the second ends the call: a caller who has put
 // the phone down should not hold an open line and a running model session, and one
 // who is looking for a bank statement needs longer than a pause.
@@ -147,6 +154,8 @@ function handleCall(twilioWs, opts = {}) {
   let nudged = false;
   const handledCalls = new Set();
   let markQueue = [];
+  // Bytes of bot audio the carrier has not finished playing yet.
+  let queuedBytes = 0;
   // Response ids the server asked for, and whether the next one to be created is
   // ours. Everything else the model generates is heard by nobody.
   const instructed = new Set();
@@ -247,7 +256,12 @@ function handleCall(twilioWs, opts = {}) {
           lastActivity = Date.now();
           toTwilio({ event: 'media', streamSid, media: { payload: msg.delta } });
           toTwilio({ event: 'mark', streamSid, mark: { name: 'chunk' } });
-          markQueue.push('chunk');
+          // Each entry carries how much audio it is worth, so the gate below can open
+          // on the tail of the line rather than on the very last mark. u-law at 8 kHz
+          // is 8000 bytes a second, and base64 carries three bytes in four characters.
+          const chunkBytes = Math.round((msg.delta.length * 3) / 4);
+          markQueue.push(chunkBytes);
+          queuedBytes += chunkBytes;
           framesThisLine += 1;
           bytesThisLine += msg.delta.length;
         } else if (msg.delta && !streamSid) {
@@ -281,6 +295,7 @@ function handleCall(twilioWs, opts = {}) {
           toTwilio({ event: 'clear', streamSid });
           if (responseActive) toOpenai({ type: 'response.cancel' });
           markQueue = [];
+          queuedBytes = 0;
         }
         break;
 
@@ -519,7 +534,17 @@ function handleCall(twilioWs, opts = {}) {
         // line has finished playing removes the whole class of self-interruption. The
         // keypad still works — DTMF is handled separately and can stop the bot. The time
         // cap keeps a stuck queue from ever leaving the caller unheard.
-        if ((responseActive || markQueue.length > 0) && Date.now() - speakingSince < MAX_DEAF_MS) break;
+        //
+        // The gate opens on the TAIL of the line, not on its last byte. People start
+        // answering while the last syllable is still playing, and a mic that opened
+        // exactly at the end clipped the front of the reply or missed it entirely.
+        // MIC_LEAD_BYTES of audio may still be queued when the caller is let in.
+        if (
+          (responseActive || queuedBytes > MIC_LEAD_BYTES) &&
+          Date.now() - speakingSince < MAX_DEAF_MS
+        ) {
+          break;
+        }
         toOpenai({ type: 'input_audio_buffer.append', audio: data.media.payload });
         break;
 
@@ -528,7 +553,7 @@ function handleCall(twilioWs, opts = {}) {
         break;
 
       case 'mark':
-        markQueue.shift();
+        queuedBytes = Math.max(0, queuedBytes - (markQueue.shift() || 0));
         break;
 
       case 'stop':
@@ -614,6 +639,7 @@ function handleCall(twilioWs, opts = {}) {
     if (!dtmfBuffer && streamSid) {
       toTwilio({ event: 'clear', streamSid });
       markQueue = [];
+          queuedBytes = 0;
       typing = true;
     }
 

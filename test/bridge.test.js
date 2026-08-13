@@ -304,6 +304,33 @@ t('the fields nothing can check are read back and wait for a yes', () => {
   assert.match(lastToolResult().say_next, /Spell out the whole address/);
 });
 
+t('the mic opens on the tail of the line, not after its last byte', () => {
+  // People answer on the last syllable. A mic that waited for the final mark clipped
+  // the front of the reply or lost it, and the caller repeated themselves into a bot
+  // that had already moved on. About 100ms of audio may still be playing when they
+  // are let in.
+  const { twilio, openai } = startCall();
+  const frame = (bytes) => 'A'.repeat(Math.ceil((bytes * 4) / 3));
+  openai.emit('message', JSON.stringify({ type: 'response.created', response: { id: 'r1' } }));
+  // Two chunks queued: 4000 bytes (half a second) and then 400 bytes (50ms).
+  openai.emit('message', JSON.stringify({ type: 'response.output_audio.delta', response_id: 'r1', delta: frame(4000) }));
+  openai.emit('message', JSON.stringify({ type: 'response.output_audio.delta', response_id: 'r1', delta: frame(400) }));
+  openai.emit('message', JSON.stringify({ type: 'response.done', response: { id: 'r1', output: [] } }));
+
+  // Half a second still to play: the caller is not heard yet.
+  twilio.emit('message', JSON.stringify({ event: 'media', streamSid: 'MZtest', media: { payload: 'CCCC' } }));
+  assert.strictEqual(openai.ofType('input_audio_buffer.append').length, 0, 'mic opened too early');
+
+  // The big chunk finishes; only the 50ms tail is left, which is inside the lead.
+  twilio.emit('message', JSON.stringify({ event: 'mark', streamSid: 'MZtest', mark: { name: 'chunk' } }));
+  twilio.emit('message', JSON.stringify({ event: 'media', streamSid: 'MZtest', media: { payload: 'DDDD' } }));
+  assert.strictEqual(
+    openai.ofType('input_audio_buffer.append').length,
+    1,
+    'mic stayed shut through the tail of the line',
+  );
+});
+
 t('only the line the server asked for is played to the caller', () => {
   // Server VAD creates a response of its own every time the caller stops talking, and
   // the model both calls save_answer in it and says whatever it likes, since nobody
