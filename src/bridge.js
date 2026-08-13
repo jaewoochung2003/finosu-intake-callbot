@@ -123,6 +123,9 @@ function handleCall(twilioWs, opts = {}) {
   let streamSid = null;
   let finished = false;
   let dtmfBuffer = '';
+  // The caller is entering digits, so the bot's remaining audio for this line is held
+  // back rather than played over them. Cleared when the entry commits.
+  let typing = false;
   // Audio frames forwarded for the line currently being spoken, reset when the line's
   // transcript lands. Distinguishes a line the bot said from a line the caller heard.
   let framesThisLine = 0;
@@ -213,7 +216,7 @@ function handleCall(twilioWs, opts = {}) {
       // Audio back to the caller. The payload is already u-law base64.
       case 'response.output_audio.delta':
       case 'response.audio.delta':
-        if (msg.delta && streamSid) {
+        if (msg.delta && streamSid && !typing) {
           lastActivity = Date.now();
           toTwilio({ event: 'media', streamSid, media: { payload: msg.delta } });
           toTwilio({ event: 'mark', streamSid, mark: { name: 'chunk' } });
@@ -260,6 +263,7 @@ function handleCall(twilioWs, opts = {}) {
       case 'conversation.item.input_audio_transcription.completed': {
         if (!msg.transcript) break;
         lastCallerSaid = msg.transcript;
+        typing = false;
         const open = intake.currentField(session);
         log(
           session.callSid,
@@ -565,11 +569,20 @@ function handleCall(twilioWs, opts = {}) {
     }
     if (!/^\d$/.test(digit)) return;
 
-    // The first press means they chose the keypad; stop talking over them.
+    // The first press means they chose the keypad, so stop talking over them. Drop the
+    // audio already queued at the carrier and hold back whatever else this line
+    // generates, but do NOT cancel the response.
+    //
+    // Cancelling is what made typing early destroy the turn. The model treats a
+    // cancelled response as being cut off and writes itself a recovery line, so a
+    // caller who started typing before the question finished got "Go ahead whenever
+    // you're ready", then "I'm ready for your account number now", each one a fresh
+    // response arriving on top of the digits still being entered. Left alone the model
+    // finishes its turn into a muted channel and says nothing more.
     if (!dtmfBuffer && streamSid) {
       toTwilio({ event: 'clear', streamSid });
-      toOpenai({ type: 'response.cancel' });
       markQueue = [];
+      typing = true;
     }
 
     // Remember which question the digits are for. The idle timer fires later, and
@@ -591,6 +604,7 @@ function handleCall(twilioWs, opts = {}) {
     }
     const digits = dtmfBuffer;
     const forField = dtmfField;
+    typing = false;
     dtmfBuffer = '';
     dtmfField = null;
     if (!digits) return;
