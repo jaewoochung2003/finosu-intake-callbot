@@ -30,7 +30,7 @@ const INCOME_THRESHOLD = 2000;
 // Approved with no name, no social, no date of birth and no address — a caller who
 // hung up after the account number, or whose name never validated, got a clean green
 // Approved over blank identity lines. A missing one of these now forces Incomplete,
-// which is the recoverable outcome DECISIONS.md already promises for a left-empty field.
+// which is the recoverable outcome the README already promises for a left-empty field.
 const REQUIRED_FIELDS = [
   'name', 'email', 'birthday', 'ssn_last_four',
   'street_1', 'city', 'state', 'zip',
