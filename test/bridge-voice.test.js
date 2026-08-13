@@ -181,7 +181,7 @@ t('the read-back is spoken whole, question and all', async () => {
   call.say('Mama');
   await sleep(10);
   const line = call.spoken[call.spoken.length - 1];
-  assert.match(line, /j o e m a m a/i, `no spelling: ${line}`);
+  assert.match(line, /j[\s.]+o[\s.]+e[\s.]+m[\s.]+a[\s.]+m[\s.]+a/i, `no spelling: ${line}`);
   assert.match(line, /is that right\?$/i, `no question on the end: ${line}`);
 });
 
@@ -211,7 +211,7 @@ t('line noise is not an answer, but is not met with silence either', async () =>
   call.say('Thank you.');
   await sleep(20);
   // Not written into the form...
-  assert.doesNotMatch(call.spoken.join(' '), /that's t h a n k/i, 'filler was taken as a name');
+  assert.doesNotMatch(call.spoken.join(' '), /that's[\s.]+t[\s.]+h[\s.]+a[\s.]+n[\s.]+k/i, 'filler was taken as a name');
   // ...and not answered with nothing. On a live call the caller spoke, heard nothing
   // back, and sat there saying "Hello?" into a bot they could not tell from a dead
   // line.
@@ -453,4 +453,27 @@ t('an option named in the plural is that option', () => {
   // negative is still not an answer.
   assert.strictEqual(P.parseEnum('checking or savings? checking', ['Checking', 'Savings'], {}), null);
   assert.strictEqual(P.parseEnum('not a student', JOBS, {}), null);
+});
+
+// A read-back exists so the caller can check a value one character at a time. Slowing
+// the line down does not make that possible: it makes each letter longer, not the gaps
+// between them wider, which is a drawl rather than a spelling. The pause has to be in
+// the text, and only one thing put it there — measured on "That's j o e m a m a" at
+// the same speed: commas 2.04s, full stops 1.98s, spaces 2.00s, three dots 2.94s.
+t('spelled-out characters carry a gap the reader will actually pause on', () => {
+  const V = require('../src/validate');
+  assert.strictEqual(V.spellWords('Joe'), 'j... o... e');
+  assert.strictEqual(V.spellDigits('021'), '0... 2... 1');
+  assert.match(V.spellEmail('zoey@gmail.com'), /^z\.\.\. o\.\.\. e\.\.\. y, at gmail dot com$/);
+});
+
+// And the line still has to be recognised as a read-back afterwards. It was not: the
+// test looked for single characters separated by whitespace, the separator became
+// three dots and a space, and every read-back went out at the pace of an ordinary
+// question — the one pace they exist to avoid.
+t('a read-back is still recognised as one after the separator changed', () => {
+  const V = require('../src/validate');
+  assert.strictEqual(voice.speedFor(`Okay, ${V.spellDigits('021000021')}. Is that right?`), voice.TTS_SPEED_SPELLED);
+  assert.strictEqual(voice.speedFor(`That's ${V.spellWords('Joe Mama')}.`), voice.TTS_SPEED_SPELLED);
+  assert.strictEqual(voice.speedFor('Got it, Vienna. And the state?'), voice.TTS_SPEED_PLAIN);
 });

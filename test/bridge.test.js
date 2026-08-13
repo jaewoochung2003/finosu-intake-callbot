@@ -253,7 +253,7 @@ t('an answer comes back as a tool output and the next line to say', () => {
   assert.match(r.say_next, /last name/);
   // the whole name is read back once the second half lands
   say('Kim');
-  assert.match(lastToolResult().say_next, /Okay, Gabriel Kim\. That's g a b r i e l k i m\. Is that right\?/);
+  assert.match(lastToolResult().say_next, /Okay, Gabriel Kim\. That's[\s.]+g[\s.]+a[\s.]+b[\s.]+r[\s.]+i[\s.]+e[\s.]+l[\s.]+k[\s.]+i[\s.]+m\. Is that right\?/);
   say('yes');
   assert.match(lastToolResult().say_next, /email address/);
   // and the model is told to speak again
@@ -303,7 +303,7 @@ t('the fields nothing can check are read back and wait for a yes', () => {
   assert.match(lastToolResult().say_next, /Is that right\?$/);
   say('yes');
   say('gabriel at finosu dot com');
-  assert.match(lastToolResult().say_next, /g a b r i e l, at finosu dot com\. Is that right\?$/);
+  assert.match(lastToolResult().say_next, /g[\s.]+a[\s.]+b[\s.]+r[\s.]+i[\s.]+e[\s.]+l, at finosu dot com\. Is that right\?$/);
   // a no sends it back to the same question, spelled this time
   say('no');
   assert.match(lastToolResult().say_next, /Spell out the whole address/);
@@ -569,7 +569,7 @@ tKeypad('star clears a half-typed entry and the caller types it again', () => {
   call.press('021000021');
   const said = call.openai.ofType('response.create').map((m) => m.response.instructions).join(' ');
   assert.match(said, /Is that right/i, 'the retyped number did not land');
-  assert.doesNotMatch(said, /0 2 1 9/, 'the cleared digits survived');
+  assert.doesNotMatch(said, /0[\s.]+2[\s.]+1[\s.]+9/, 'the cleared digits survived');
 });
 
 // ---------- end of call ----------
@@ -1054,7 +1054,7 @@ t('the read-back question goes out as its own line', () => {
   const question = asked[asked.length - 1];
   const body = asked[asked.length - 2];
   assert.match(question, /LINE: Is that right\?$/m, `last line was: ${question.slice(-80)}`);
-  assert.match(body, /j o e m a m a/i, 'the spelling was not sent');
+  assert.match(body, /j[\s.]+o[\s.]+e[\s.]+m[\s.]+a[\s.]+m[\s.]+a/i, 'the spelling was not sent');
   assert.doesNotMatch(body, /is that right/i, 'the question is still riding on the long line');
 });
 
