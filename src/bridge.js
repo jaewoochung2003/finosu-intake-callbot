@@ -25,6 +25,7 @@ const path = require('path');
 const WebSocket = require('ws');
 
 const intake = require('./intake');
+const P = require('./parse');
 const V = require('./validate');
 const agent = require('./agent');
 const format = require('./format');
@@ -49,6 +50,45 @@ const DTMF_DEAF_MS = 800;
 // Hard stop on how long the sockets stay open after the decision, waiting for the
 // closing line to finish playing.
 const CLOSE_MAX_MS = 15000;
+// How long after the bot starts a line before an interruption counts as one.
+const BARGE_IN_GRACE_MS = 700;
+// A quiet line. The first is a nudge, the second ends the call: a caller who has put
+// the phone down should not hold an open line and a running model session, and one
+// who is looking for a bank statement needs longer than a pause.
+const QUIET_NUDGE_MS = 20000;
+const QUIET_END_MS = 50000;
+
+// What speech recognition writes when it is handed silence or line hiss. These are
+// not answers, and on a live call one of them was filed as an applicant's name.
+// Whisper produces them with no audible speech anywhere in the audio.
+const NOT_SPEECH = new Set([
+  'thank you',
+  'thanks',
+  'thank you very much',
+  'thanks for watching',
+  'thank you for watching',
+  'please subscribe',
+  'bye',
+  'goodbye',
+  'you',
+  '',
+]);
+
+const isNotSpeech = (text) => {
+  const raw = String(text || '').trim();
+  if (!raw) return true;
+  // Digits are an answer, always. Stripping non-letters first turned "3000" into an
+  // empty string, which matched the empty entry in the list above, so every answer
+  // made only of digits was thrown away: the income figure, the zip, and a social or
+  // routing number said out loud rather than typed.
+  if (/\d/.test(raw)) return false;
+  const t = raw
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return NOT_SPEECH.has(t);
+};
 
 function log(callSid, ...args) {
   console.log(`[${callSid || '----'}]`, ...args);
@@ -62,6 +102,10 @@ function handleCall(twilioWs, opts = {}) {
     openWebSocket = (url, options) => new WebSocket(url, options),
     deliver = sendEmail,
     callsDir = CALLS_DIR,
+    quietNudgeMs = QUIET_NUDGE_MS,
+    quietEndMs = QUIET_END_MS,
+    // How long the goodbye line gets to play before the sockets close.
+    goodbyeMs = 3000,
   } = opts;
 
   const session = intake.startSession({ earlyKnockout: process.env.EARLY_KNOCKOUT !== '0' });
@@ -73,6 +117,16 @@ function handleCall(twilioWs, opts = {}) {
   let dtmfTimer = null;
   let suppressSavesUntil = 0;
   let dtmfDeafUntil = 0;
+  // The caller's last transcribed words, kept so end_call can be checked against
+  // what they actually said rather than taken on the model's word.
+  let lastCallerSaid = '';
+  // Whether the model is generating right now. Only then is a cancel meaningful.
+  let responseActive = false;
+  // When the bot started its current line.
+  let speakingSince = 0;
+  // The last time either side made a sound, and whether the quiet has been noted.
+  let lastActivity = Date.now();
+  let nudged = false;
   const handledCalls = new Set();
   let markQueue = [];
 
@@ -91,7 +145,9 @@ function handleCall(twilioWs, opts = {}) {
   // Ask the model to say a specific line next. Used for the greeting, for keypad
   // confirmations, and for the closing line, all of which originate on this side.
   const speak = (line, { cancelFirst = false } = {}) => {
-    if (cancelFirst) toOpenai({ type: 'response.cancel' });
+    // Cancelling when nothing is generating is an error back from the API on every
+    // turn, which buries the log lines that matter under noise.
+    if (cancelFirst && responseActive) toOpenai({ type: 'response.cancel' });
     toOpenai({
       type: 'response.create',
       response: { instructions: `Say this to the caller, in your own voice: "${line}"` },
@@ -116,24 +172,41 @@ function handleCall(twilioWs, opts = {}) {
 
     switch (msg.type) {
       case 'error':
+        // A cancel that lands as the response is already finishing answers with this
+        // and nothing else happens. It is a race, not a fault, and printing it hides
+        // the errors that matter in a log someone reads after a bad call.
+        if ((msg.error || {}).code === 'response_cancel_not_active') break;
         log(session.callSid, 'openai error:', JSON.stringify(msg.error || msg));
+        break;
+
+      case 'response.created':
+        responseActive = true;
+        speakingSince = Date.now();
+        lastActivity = Date.now();
         break;
 
       // Audio back to the caller. The payload is already u-law base64.
       case 'response.output_audio.delta':
       case 'response.audio.delta':
         if (msg.delta && streamSid) {
+          lastActivity = Date.now();
           toTwilio({ event: 'media', streamSid, media: { payload: msg.delta } });
           toTwilio({ event: 'mark', streamSid, mark: { name: 'chunk' } });
           markQueue.push('chunk');
         }
         break;
 
-      // The caller started talking over the bot.
+      // The caller started talking over the bot. Not in the first moment of a line
+      // though: a real interruption comes after the caller has heard enough to want
+      // to interrupt, and what arrives in the first half second is the line noise
+      // that opens every phone call.
       case 'input_audio_buffer.speech_started':
+        lastActivity = Date.now();
+        nudged = false;
+        if (Date.now() - speakingSince < BARGE_IN_GRACE_MS) break;
         if (markQueue.length && streamSid) {
           toTwilio({ event: 'clear', streamSid });
-          toOpenai({ type: 'response.cancel' });
+          if (responseActive) toOpenai({ type: 'response.cancel' });
           markQueue = [];
         }
         break;
@@ -143,6 +216,7 @@ function handleCall(twilioWs, opts = {}) {
       // redacted against whichever field is open rather than printed raw.
       case 'conversation.item.input_audio_transcription.completed': {
         if (!msg.transcript) break;
+        lastCallerSaid = msg.transcript;
         const open = intake.currentField(session);
         log(
           session.callSid,
@@ -157,6 +231,7 @@ function handleCall(twilioWs, opts = {}) {
         break;
 
       case 'response.done': {
+        responseActive = false;
         for (const item of msg.response?.output || []) {
           if (item.type === 'function_call') onToolCall(item.call_id, item.name, item.arguments);
         }
@@ -186,7 +261,20 @@ function handleCall(twilioWs, opts = {}) {
 
     let result;
     if (name === 'save_answer') {
-      if (Date.now() < suppressSavesUntil) {
+      if (isNotSpeech(args.answer)) {
+        // Nothing was said. Say so like a person would and ask again, rather than
+        // writing silence into the form or repeating the question with no reason.
+        log(session.callSid, 'ignored a save from silence:', JSON.stringify(String(args.answer || '')));
+        result = {
+          accepted: false,
+          problem: 'Sorry, I did not catch that',
+          say_next: intake.nextPrompt(session),
+        };
+      } else if (Date.now() < suppressSavesUntil && !session.pending) {
+        // The suppression window stops the model filing the tones it just heard as
+        // if they were speech. It must not swallow the yes that answers a read-back:
+        // the keypad entry is followed immediately by "I have 5 5 1 2..., is that
+        // right?", and the caller answers inside the window every time.
         result = {
           accepted: false,
           problem: 'already captured from the keypad',
@@ -201,8 +289,29 @@ function handleCall(twilioWs, opts = {}) {
         ? toResult(back)
         : { accepted: false, problem: 'nothing to go back to', say_next: intake.nextPrompt(session) };
     } else if (name === 'end_call') {
-      log(session.callSid, 'caller ended:', args.reason);
-      result = toResult(intake.complete(session));
+      // Hanging up is the one thing the model can do that cannot be undone, and it
+      // did it once on a caller who had said nothing but "no" to a yes-or-no
+      // question. So the caller's own last words decide, not the model's reading of
+      // them: no request to stop, no end of call, and the open question is asked
+      // again. A caller who really wants out hangs up, which the stop event handles.
+      if (!P.saysStop(lastCallerSaid)) {
+        const open = intake.currentField(session);
+        log(
+          session.callSid,
+          'refused end_call —',
+          JSON.stringify(String(args.reason || '').slice(0, 80)),
+          'after: ' +
+            JSON.stringify(V.redact(open ? open.key : '', String(lastCallerSaid).slice(0, 60))),
+        );
+        result = {
+          accepted: false,
+          problem: 'the caller did not ask to stop',
+          say_next: intake.nextPrompt(session),
+        };
+      } else {
+        log(session.callSid, 'caller ended:', args.reason);
+        result = toResult(intake.complete(session));
+      }
     } else {
       result = { accepted: false, problem: `unknown tool ${name}` };
     }
@@ -211,7 +320,26 @@ function handleCall(twilioWs, opts = {}) {
       type: 'conversation.item.create',
       item: { type: 'function_call_output', call_id: callId, output: JSON.stringify(result) },
     });
-    toOpenai({ type: 'response.create' });
+
+    // The server dictates the next line rather than leaving the model to compose one
+    // off the tool result. On a live call the caller talked over the bot, the
+    // interruption cancelled the response the save_answer call was riding in, and the
+    // answer was lost while the model went on believing it had been recorded. From
+    // that point the model asked question N+1 and the server filed the reply under
+    // question N, and every answer after it landed in the wrong field. Handing over
+    // the exact words keeps the two in step, whatever the model thinks happened.
+    const line = [
+      result.problem ? `${result.problem}.` : null,
+      result.note ? `${result.note}.` : null,
+      result.say_next,
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .trim();
+    // No cancel here: the response this tool call arrived in is already finishing,
+    // and asking to cancel it races the API into an error on every single turn.
+    if (line) speak(line);
+    else toOpenai({ type: 'response.create' });
 
     if (result.done) closeOut('script complete');
   }
@@ -243,6 +371,7 @@ function handleCall(twilioWs, opts = {}) {
 
     switch (data.event) {
       case 'start':
+        startQuietWatch();
         streamSid = data.start.streamSid;
         session.callSid = data.start.callSid || session.callSid;
         session.from = data.start.customParameters?.from || session.from;
@@ -274,9 +403,41 @@ function handleCall(twilioWs, opts = {}) {
   twilioWs.on('close', () => closeOut('socket closed'));
   twilioWs.on('error', (e) => log(session.callSid, 'twilio socket error:', e.message));
 
+  // ---------- a caller who has gone quiet ----------
+
+  // Nothing in the model or the carrier ends a silent call. Without this a caller who
+  // put the phone down held an open line and a paid model session until the process
+  // was killed, and a caller who simply stopped talking heard nothing at all.
+  function startQuietWatch() {
+    const timer = setInterval(() => {
+      if (finished) {
+        clearInterval(timer);
+        return;
+      }
+      const quiet = Date.now() - lastActivity;
+      if (!nudged && quiet > quietNudgeMs) {
+        nudged = true;
+        lastActivity = Date.now();
+        speak('Are you still there?');
+        return;
+      }
+      if (nudged && quiet > quietEndMs - quietNudgeMs) {
+        log(session.callSid, 'caller went quiet');
+        speak("I'll let you go. Call back when you're ready and we can pick this up.");
+        setTimeout(() => closeOut('caller went quiet'), goodbyeMs);
+        clearInterval(timer);
+      }
+    }, Math.min(2000, Math.max(20, Math.floor(quietNudgeMs / 3))));
+  }
+
   // ---------- keypad ----------
 
   function onDtmf(digit) {
+    // A keypad press is a caller doing something. Without this the quiet watch saw
+    // silence while somebody read a routing number off a bank card and typed it in,
+    // asked whether they were still there, and hung up on them mid-number.
+    lastActivity = Date.now();
+    nudged = false;
     const field = intake.currentField(session);
     if (!field || !field.dtmf) return; // current question is not a number
 

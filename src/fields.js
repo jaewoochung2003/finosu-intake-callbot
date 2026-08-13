@@ -75,20 +75,51 @@ const EMPLOYMENT_SYNONYMS = {
 const FIELDS = [
   // --- who is calling -------------------------------------------------------
   {
-    key: 'name',
-    label: 'Name',
+    key: 'first_name',
+    label: 'First Name',
     group: 'Applicant',
-    ask: 'Can I start with your full name?',
-    reask: 'I want to be sure I have that right.',
-    validate: (said) => V.validateName(said),
+    ask: 'Can I start with your first name?',
+    reask: 'Your first name one more time?',
+    validate: (said) => V.validateNamePart(said, 'first'),
+  },
+  {
+    key: 'last_name',
+    label: 'Last Name',
+    group: 'Applicant',
+    ask: 'And your last name?',
+    reask: 'And the last name once more?',
+    // Asked in two parts, confirmed as one. Two parts because a bot that ever says
+    // the caller's name has to know which half is the first name, and because a
+    // caller who gives a surname first ("Chung Jaewoo") puts a backwards name on the
+    // form with nothing to catch it. Confirmed once because two read-backs for one
+    // name is a call nobody wants to be on.
+    //
+    // Spelled as one run, no pause between the parts: a wrong letter is audible,
+    // a stray space is not, and spacing is not worth a correction because nothing
+    // downstream compares on it.
+    confirm: true,
+    confirmLine: (v, app) => {
+      const whole = [app.first_name, v].filter(Boolean).join(' ');
+      return `Okay, ${whole}. That's ${V.spellWords(whole)}.`;
+    },
+    confirmCovers: ['first_name', 'last_name'],
+    respell: 'No problem. Spell your first name for me.',
+    // The brief's form has one Name line, so the two answers are joined the moment
+    // the second one lands.
+    // A half the caller never managed to give leaves the other half standing; the
+    // form prints what there is rather than the word "undefined".
+    derive: (v, app) => ({ name: [app.first_name, v].filter(Boolean).join(' ') }),
+    validate: (said) => V.validateNamePart(said, 'last'),
   },
   {
     key: 'email',
     label: 'Email',
     group: 'Applicant',
-    ask: 'What email address should we send the decision to?',
-    reask: 'Let me get that email again.',
+    ask: "What's the best email address to send the decision to?",
+    reask: 'That email one more time?',
     confirm: true,
+    confirmLine: (v) => `So that's ${V.spellEmail(v)}.`,
+    respell: 'No problem. Spell the part before the at sign, one letter at a time.',
     validate: (said) => V.validateEmail(said),
   },
   {
@@ -103,7 +134,7 @@ const FIELDS = [
     key: 'sms_number',
     label: 'Number for SMS if different',
     group: 'Applicant',
-    ask: 'Is there a different number you want text messages sent to? If the number you are calling from is fine, just say no.',
+    ask: "Do you want texts going to a different number? If this one's fine, just say no.",
     optional: true,
     skipOn: P.saysNone,
     skipValue: 'Same as calling number',
@@ -116,8 +147,8 @@ const FIELDS = [
     key: 'employment_status',
     label: 'Employment Status',
     group: 'Employment',
-    ask: 'What is your current employment status?',
-    reask: 'I need your employment status.',
+    ask: "What's your work situation right now?",
+    reask: 'Working, self-employed, unemployed, retired, or a student?',
     knockout: true,
     validate: (said) => V.validateEnum(said, EMPLOYMENT_STATUSES, EMPLOYMENT_SYNONYMS),
   },
@@ -137,7 +168,7 @@ const FIELDS = [
     key: 'monthly_income',
     label: 'Monthly income',
     group: 'Employment',
-    ask: 'And about how much do you bring in a month? A rough figure is fine, or tell me what one paycheck is and I will work it out.',
+    ask: "And roughly how much do you bring in a month? A ballpark is fine, or tell me what one paycheck is and I'll work it out.",
     reask: 'A rough dollar figure is all I need.',
     knockout: true,
     // The boolean the brief asks for is derived here rather than asked, so the
@@ -151,8 +182,8 @@ const FIELDS = [
     key: 'income_over_2000',
     label: 'If salary is over 2000 dollars a month',
     group: 'Employment',
-    ask: 'Then let me just ask it this way. Is what you bring in more than two thousand dollars a month?',
-    reask: 'I need a yes or a no on whether it is over two thousand a month.',
+    ask: 'Let me ask it another way. Is it more than two thousand a month?',
+    reask: 'Yes or no, is it over two thousand a month?',
     knockout: true,
     appliesWhen: (app) => app.income_over_2000 === undefined,
     validate: (said, app) => V.validateIncomeOver(said, INCOME_THRESHOLD, app.pay_frequency),
@@ -161,8 +192,8 @@ const FIELDS = [
     key: 'deployed_military',
     label: 'If I am deployed military',
     group: 'Eligibility',
-    ask: 'Are you active duty military on deployment, or a dependent of someone who is?',
-    reask: 'I need a yes or a no on the deployment question.',
+    ask: 'Are you active duty military on deployment right now, or a dependent of someone who is?',
+    reask: 'Yes or no, are you deployed right now?',
     knockout: true,
     validate: (said) => V.validateYesNo(said),
   },
@@ -170,8 +201,8 @@ const FIELDS = [
     key: 'financial_assistance',
     label: 'If I am on financial assistance',
     group: 'Eligibility',
-    ask: 'Are you currently receiving any government financial assistance?',
-    reask: 'I need a yes or a no on financial assistance.',
+    ask: 'Are you getting any government financial assistance right now?',
+    reask: 'Yes or no, any government assistance?',
     knockout: true,
     validate: (said) => V.validateYesNo(said),
   },
@@ -179,7 +210,7 @@ const FIELDS = [
     key: 'account_type',
     label: 'Checking/Savings',
     group: 'Bank Account',
-    ask: 'Would the funds go into a checking account or a savings account?',
+    ask: 'Is this going into a checking account or a savings account?',
     reask: 'Checking or savings?',
     knockout: true,
     validate: (said) =>
@@ -195,8 +226,8 @@ const FIELDS = [
     key: 'ssn_last_four',
     label: 'Last Four of Social',
     group: 'Applicant',
-    ask: 'I need the last four digits of your social security number. You can say them or type them on your keypad.',
-    reask: 'Let me take those last four digits again.',
+    ask: 'Last four of your social. You can say them, or type them on the keypad.',
+    reask: 'Those four digits one more time?',
     dtmf: 4,
     sensitive: true,
     validate: (said) => V.validateSsn4(said),
@@ -205,11 +236,18 @@ const FIELDS = [
     key: 'routing_number',
     label: 'Routing Number',
     group: 'Bank Account',
-    ask: 'What is the nine digit routing number for that account? Typing it on your keypad is the surest way.',
-    reask: 'Let me take that routing number again.',
+    ask: "What's the nine digit routing number? If you have it in front of you, the keypad is the safest way.",
+    reask: 'One more time on that routing number.',
     dtmf: 9,
     sensitive: true,
+    // Digit by digit, and with the bank named. The check digit and the Fed
+    // directory catch a number that was never issued; neither catches a real
+    // routing number belonging to the wrong bank, and hearing "that is Chase" when
+    // you bank at Wells Fargo does.
     confirm: true,
+    confirmLine: (v, app) =>
+      `Okay, ${V.spellDigits(v)}${app && app.bank_name ? `. That's ${app.bank_name}` : ''}.`,
+    respell: 'Let me take that routing number again, one digit at a time.',
     validate: (said) => V.validateRouting(said),
   },
   {
@@ -217,10 +255,14 @@ const FIELDS = [
     label: 'Account Number',
     group: 'Bank Account',
     ask: 'And the account number itself.',
-    reask: 'Let me take that account number again.',
+    reask: 'That account number once more?',
     dtmf: 17,
     sensitive: true,
+    // An account number has no check digit and no directory. Nothing but the caller
+    // can tell a real one from a plausible one, so the caller is asked.
     confirm: true,
+    confirmLine: (v) => `And that's ${V.spellDigits(v)}.`,
+    respell: 'Let me take that account number again, one digit at a time.',
     validate: (said, app) =>
       V.validateAccount(said, { routing: app.routing_number, ssn4: app.ssn_last_four }),
   },
@@ -230,7 +272,7 @@ const FIELDS = [
     key: 'street_1',
     label: 'Street Address 1',
     group: 'Address',
-    ask: 'What is your street address?',
+    ask: "What's your street address?",
     reask: 'The street address again.',
     validate: (said) => V.validateText(said, { min: 4 }),
   },
@@ -238,7 +280,7 @@ const FIELDS = [
     key: 'street_2',
     label: 'Street Address 2',
     group: 'Address',
-    ask: 'Is there an apartment or unit number?',
+    ask: 'Any apartment or unit number?',
     optional: true,
     skipOn: (said) => P.saysNone(said, { maxWords: 3 }),
     skipValue: '',
@@ -248,21 +290,21 @@ const FIELDS = [
     key: 'city',
     label: 'City',
     group: 'Address',
-    ask: 'City?',
+    ask: 'And the city?',
     validate: (said) => V.validateText(said, { min: 2, max: 60 }),
   },
   {
     key: 'state',
     label: 'State',
     group: 'Address',
-    ask: 'State?',
+    ask: 'And the state?',
     validate: (said) => V.validateState(said),
   },
   {
     key: 'zip',
     label: 'Zip Code',
     group: 'Address',
-    ask: 'And the zip code.',
+    ask: 'And the zip?',
     dtmf: 5,
     validate: (said) => V.validateZip(said),
   },
@@ -281,7 +323,7 @@ const FIELDS = [
     group: 'Employment',
     // Plenty of hourly jobs have no department, and without a skip phrase the
     // answer "I don't have one" gets written in as the department.
-    ask: 'Do you work in a particular department? If not, that is fine.',
+    ask: 'Are you in a particular department? If not, no problem.',
     optional: true,
     // Bounded: a department really called "Not-For-Profit Services" reads as a no
     // to the yes/no parser, and without the word cap it gets thrown away.
@@ -320,17 +362,23 @@ const FIELDS = [
     key: 'employer_address',
     label: 'Employer address',
     group: 'Employment',
-    ask: 'What is the address where you work? Street, city and state is enough.',
-    reask: 'The work address again.',
+    ask: "What's the address where you work? Street, city and state is plenty.",
+    reask: 'The work address one more time?',
     validate: (said) => V.validateText(said, { min: 6, max: 160 }),
   },
   {
     key: 'employer_phone',
     label: 'Employer phone number',
     group: 'Employment',
-    ask: 'And a phone number for your employer.',
-    reask: 'Let me take that employer phone number again.',
+    ask: 'And a phone number for your employer, if they have one.',
+    reask: 'That phone number one more time?',
     dtmf: 10,
+    // A freelancer's client or a one-person shop has no phone line, and a caller
+    // saying so was re-asked three times for a number that does not exist. Same
+    // skip the department question has.
+    optional: true,
+    skipOn: (said) => P.saysNone(said, { maxWords: 8 }),
+    skipValue: 'None',
     validate: (said) => V.validatePhone(said),
   },
 ];
@@ -364,7 +412,13 @@ const FORM_ORDER = [
   'deployed_military',
 ];
 
-const BY_KEY = Object.fromEntries(FIELDS.map((f) => [f.key, f]));
+// `name` is not asked; it is the two answers joined. The form the brief specified
+// has one line for it, and this is the entry that prints that line.
+const FORM_ONLY = {
+  name: { key: 'name', label: 'Name', group: 'Applicant' },
+};
+
+const BY_KEY = { ...Object.fromEntries(FIELDS.map((f) => [f.key, f])), ...FORM_ONLY };
 
 // Captured on the call but not part of the form the brief listed. Printed under
 // their own heading so the brief's 24 lines stay exactly as the brief wrote them.

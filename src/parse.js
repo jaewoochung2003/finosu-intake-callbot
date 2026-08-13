@@ -105,7 +105,13 @@ function wordDigits(w) {
 // "triple zero one", and a plain "4821". Anything it cannot read becomes nothing,
 // which is what makes a bad capture fail validation instead of passing quietly.
 function spokenDigits(text) {
-  const list = words(text);
+  // A letter O sitting in a run of digits is a zero. Speech recognition writes
+  // "O21000021" often enough that a routing number said perfectly clearly came back
+  // as no digits at all. Only inside a run: on its own, "o" is a letter, and the
+  // email parser depends on it staying one.
+  const list = words(String(text == null ? '' : text)).map((w) =>
+    /^[o\d]+$/i.test(w) && /\d/.test(w) ? w.replace(/o/gi, '0') : w,
+  );
   let out = '';
   for (let i = 0; i < list.length; i++) {
     const w = list[i];
@@ -266,6 +272,35 @@ function parseYesNo(text) {
     if (YES.has(w)) return true;
   }
   return null;
+}
+
+// Asking to stop, as opposed to answering "no" to a question. The model has an
+// end_call tool and it reached for it on a bare "no" during a live test, hanging up
+// on an applicant who was answering the deployed-military question. The server
+// checks the caller's own words against this before it lets the call end, because a
+// wrongly ended call loses an application and a wrongly refused one costs the caller
+// a hangup they were about to do anyway.
+const STOP_REQUEST = [
+  /\b(hang up|hangup)\b/,
+  /\b(stop|end|cancel|quit) (the |this )?(call|application|thing|process)\b/,
+  /\b(stop|quit) (calling|asking|talking)\b/,
+  /\b(call|try) (me )?back\b/,
+  /\b(not|no longer) interested\b/,
+  /\b(speak|talk) (to|with) (a |an |someone|somebody)?(person|human|agent|representative|rep|operator|someone|somebody)\b/,
+  /\b(real|actual|live) (person|human)\b/,
+  /\bi(?: a?m| will be)? (done|finished|out)\b/,
+  /\b(dont|do not) want to (continue|keep going|do this|go on)\b/,
+  /\b(take me off|remove me|unsubscribe)\b/,
+  /\b(never mind|nevermind|forget it|forget this)\b/,
+  /\b(another time|some other time|maybe later|later today|call later)\b/,
+  /\b(good ?bye|bye bye)\b/,
+];
+
+function saysStop(text) {
+  const raw = words(String(text == null ? '' : text).replace(/['‘’]/g, '')).join(' ');
+  if (!raw) return false;
+  if (/^(stop|quit|cancel|goodbye|bye)$/.test(raw)) return true;
+  return STOP_REQUEST.some((re) => re.test(raw));
 }
 
 // "I don't have one" is an answer to an optional question, not a failure to answer
@@ -429,8 +464,46 @@ function stripLeadingFillers(tokens) {
   return tokens.slice(i);
 }
 
+// A number said the way a year is said, starting at words[i]. Returns the value and
+// how many words it ate, or null. Handles "two thousand three", "nineteen ninety
+// four", "twenty twenty five", and the plain "two thousand". Kept apart from
+// spokenYear above, which reads a whole list and belongs to the date parser.
+function yearWordsAt(words_, i) {
+  const w = words_[i];
+  const n1 = words_[i + 1];
+  const n2 = words_[i + 2];
+
+  if (w in ONES && n1 === 'thousand') {
+    const base = ONES[w] * 1000;
+    if (n2 in ONES) return { value: base + ONES[n2], used: 3 };
+    if (n2 in TEENS) return { value: base + TEENS[n2], used: 3 };
+    if (n2 in TENS) {
+      const n3 = words_[i + 3];
+      if (n3 in ONES) return { value: base + TENS[n2] + ONES[n3], used: 4 };
+      return { value: base + TENS[n2], used: 3 };
+    }
+    return { value: base, used: 2 };
+  }
+
+  // nineteen ninety four -> 1994, twenty twenty five -> 2025
+  const lead = w in TEENS ? TEENS[w] : w in TENS ? TENS[w] : null;
+  if (lead !== null && lead >= 10 && n1 in TENS) {
+    const n3 = words_[i + 2];
+    if (n3 in ONES) return { value: lead * 100 + TENS[n1] + ONES[n3], used: 3 };
+    return { value: lead * 100 + TENS[n1], used: 2 };
+  }
+
+  return null;
+}
+
 function parseEmail(text) {
   let s = String(text == null ? '' : text).toLowerCase().trim();
+
+  // An answer arrives as a sentence and a sentence ends in a full stop, so what the
+  // model hands over is "gabriel at finosu dot com." No address ends in punctuation,
+  // and leaving it on made the final "com." fail the shape test on every live call.
+  s = s.replace(/[.!?;:,\s]+$/, '');
+
   if (/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/.test(s)) return s;
 
   s = s
@@ -445,13 +518,31 @@ function parseEmail(text) {
     .replace(/\bgmail\b/g, 'gmail')
     .replace(/[,]/g, ' ');
 
-  // spelled-out digits inside a handle: "j chung two thousand three" is not worth
-  // guessing at, but "two zero zero three" is, so map bare number words in place
-  const tokens = stripLeadingFillers(s.trim().split(/\s+/).filter(Boolean)).map((w) =>
-    w in ONES ? String(ONES[w]) : w in TEENS ? String(TEENS[w]) : w,
-  );
+  // Spelled-out digits inside a handle. Two traps, both found on a live call:
+  //
+  // "o" means the letter, not a zero. ONES maps it to 0 for phone numbers, where
+  // people do say "five oh five", but somebody spelling "jaewoo" letter by letter
+  // gets jaew00 out of it, which is the one case where spelling was meant to help.
+  //
+  // A year comes out of a mouth as "two thousand three", not as four digits, and
+  // mapping word by word produced "2thousand3".
+  const words_ = stripLeadingFillers(s.trim().split(/\s+/).filter(Boolean));
+  const tokens = [];
+  for (let i = 0; i < words_.length; i++) {
+    const w = words_[i];
+    // two thousand three, nineteen ninety four, twenty twenty five
+    const year = yearWordsAt(words_, i);
+    if (year) {
+      tokens.push(String(year.value));
+      i += year.used - 1;
+      continue;
+    }
+    if (w in ONES && w !== 'o') tokens.push(String(ONES[w]));
+    else if (w in TEENS) tokens.push(String(TEENS[w]));
+    else tokens.push(w);
+  }
 
-  const collapsed = tokens.join('');
+  const collapsed = tokens.join('').replace(/[.!?;:,]+$/, '');
   if (/^[^@]+@[^@]+\.[a-z]{2,}$/.test(collapsed)) return collapsed;
   return null;
 }
@@ -515,9 +606,51 @@ function parseEnum(text, options, synonyms = {}) {
 }
 
 // A person's name, cleaned of the lead-in. Returns null on an empty result.
+// A caller who has just heard their name back wrong spells it, and what arrives is
+// "j a e w o o, c h u n g". Joined blindly that is one word; left alone it is nine
+// one-letter names. A run of two or more single letters is a spelled word, and the
+// comma or the pause between first and last is what separates them. A lone initial
+// ("J Robert Smith") is not a run, so it survives.
+function joinSpelledRuns(text) {
+  return String(text)
+    .split(/[,;]|\band\b/i)
+    .map((chunk) => {
+      const parts = chunk.trim().split(/\s+/).filter(Boolean);
+      const out = [];
+      let run = [];
+      const flush = () => {
+        if (run.length >= 2) out.push(run.join(''));
+        else out.push(...run);
+        run = [];
+      };
+      for (const p of parts) {
+        if (/^[A-Za-z]$/.test(p)) run.push(p);
+        else {
+          flush();
+          out.push(p);
+        }
+      }
+      flush();
+      return out.join(' ');
+    })
+    .join(' ');
+}
+
 function parseName(text) {
-  const stripped = String(text == null ? '' : text)
-    .replace(/\b(my name is|my name's|this is|i'?m|it'?s|name'?s|speaking|full name is)\b/gi, ' ')
+  const stripped = joinSpelledRuns(String(text == null ? '' : text))
+    // Transcription writes a name in its native spelling — "María", "Álvarez".
+    // NFD splits an accented letter into base letter plus mark; dropping the marks
+    // keeps the letter. Without this the ASCII filter below turned í into a space
+    // and María reached the record as "Mar A".
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    // The filler at the end is not politeness, it is the whole answer sometimes:
+    // asked for a first name, a caller who has stopped listening says "mmm", and a
+    // three letter word with no meaning passed every length check a name has.
+    .replace(
+      /\b(my name is|my name's|this is|i'?m|it'?s|name'?s|speaking|full name is|umm*|uhh*|err*|ahh*|hmm+|mmm+|yeah|okay|ok)\b/gi,
+      ' ',
+    )
     .replace(/[^A-Za-z\s'-]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -534,6 +667,7 @@ module.exports = {
   parseDate,
   ageOn,
   parseYesNo,
+  saysStop,
   saysNone,
   parseAmount,
   perPaycheck,

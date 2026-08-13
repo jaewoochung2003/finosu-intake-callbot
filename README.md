@@ -3,9 +3,10 @@
 An inbound phone number you can call. It takes a loan application over the phone,
 decides on it against the five rules, and emails the filled form.
 
-The audio path is speech to speech: Twilio streams the call to OpenAI's Realtime
-API and streams the reply back, both in G.711 u-law at 8 kHz, so nothing is
-resampled or transcoded in between. The model does the talking and nothing else.
+The audio path is speech to speech: the carrier streams the call to OpenAI's
+Realtime API and streams the reply back, both in G.711 u-law at 8 kHz, so nothing is
+resampled or transcoded in between. Twilio and SignalWire both work, and the code
+that differs between them is two attributes on one line of markup. The model does the talking and nothing else.
 It holds no form, no field order and no lending rule. It has one tool,
 `save_answer`, and the server tells it what to ask next.
 
@@ -96,17 +97,44 @@ cloudflared tunnel --url http://localhost:5050
 It prints something like `https://random-words-here.trycloudflare.com`. `ngrok http
 5050` works the same way.
 
-**4. Twilio number.** console.twilio.com → Phone Numbers → Buy a number (US local,
-Voice). Open it, and under **A call comes in** set:
+**4. A number.** Either carrier works, and the code is the same on both.
+
+*SignalWire* (`CARRIER=signalwire` in `.env`). Sign up, then Dashboard → API →
+create a token; the space is the host in the dashboard URL. Put `SIGNALWIRE_SPACE`,
+`SIGNALWIRE_PROJECT_ID` and `SIGNALWIRE_API_TOKEN` in `.env` with your tunnel URL as
+`PUBLIC_WEBHOOK_URL`, then:
+
+```
+node tools/signalwire-setup.js --search 703     # what is for sale
+node tools/signalwire-setup.js --buy +1...      # buy it, pointed at the tunnel
+node tools/signalwire-setup.js --check          # what the number points at now
+```
+
+*Twilio* (`CARRIER=twilio`, the default). console.twilio.com → Phone Numbers → Buy a
+number (US local, Voice). Open it, and under **A call comes in** set:
 
 ```
 Webhook   POST   https://<your-tunnel-host>/incoming-call
 ```
 
+`node tools/twilio-setup.js --check` does the same from the terminal.
+
 Save. Call the number.
 
-On a Twilio trial account you have to verify your own number first and every call
-opens with Twilio's own trial recording. Upgrading removes both.
+Two carrier notes worth knowing before you spend an evening on either:
+
+- **A Twilio trial cannot run this bot at all.** `<Stream>` is one of the verbs
+  Twilio strips on a trial account. The number fetches the markup, reads out "the
+  Stream verb is not available on trial accounts", and hangs up, which looks exactly
+  like a bug in this repo and is not one. The account has to be upgraded.
+- SignalWire's trial mode limits *who* may call in rather than what the markup may
+  contain, so the stream itself runs.
+
+The two carriers differ by two attributes on one line of markup, in
+[`src/server.js`](src/server.js): SignalWire wants the codec named and the stream
+paced, Twilio rejects both attributes. Everything past that line is identical, since
+both send the same frames: `connected`, `start`, `media`, `dtmf`, `mark`, `stop`,
+u-law at 8 kHz, keypad presses on the same socket.
 
 ---
 

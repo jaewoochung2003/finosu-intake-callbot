@@ -30,7 +30,7 @@ function extraLines(record) {
 
 // "Name: Gabriel" lines, in the order the brief listed them.
 function formLines(record) {
-  return FORM_ORDER.map((key) => `${BY_KEY[key].label}: ${display(key, record)}`);
+  return FORM_ORDER.map((key) => `${label(key)}: ${display(key, record)}`);
 }
 
 function formText(record) {
@@ -54,6 +54,16 @@ function formTextGrouped(record) {
   return out.join('\n').trim();
 }
 
+// Lowercase, no accents, no spaces, no punctuation.
+function matchKey(name) {
+  if (!name) return null;
+  return String(name)
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+}
+
 function apiPayload(session) {
   const r = session.record;
   const outcome = session.outcome || { decision: 'Incomplete', reasons: [], unresolved: [] };
@@ -61,6 +71,13 @@ function apiPayload(session) {
     application: {
       applicant: {
         name: r.name ?? null,
+        // What a downstream lookup compares on. A name captured by phone differs
+        // from the one on file by spacing, hyphens, case and accents far more often
+        // than by letters: "Jae Woo", "Jae-Woo" and "Jaewoo" are one applicant. The
+        // spoken form is kept exactly as the caller gave it, because that is what
+        // the brief asks for and what a person should read; the key beside it is
+        // what a match runs on, so nobody normalizes the name in the caller's ear.
+        name_match_key: matchKey(r.name),
         email: r.email ?? null,
         birthday: r.birthday ?? null,
         sms_number: r.sms_number ?? null,

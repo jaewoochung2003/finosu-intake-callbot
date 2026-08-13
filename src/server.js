@@ -23,14 +23,30 @@ if (!OPENAI_API_KEY) {
   process.exit(1);
 }
 
-// The caller's number rides along as a custom parameter; Twilio delivers it in the
-// stream's start message, which is the only place the socket can learn who called.
-function twiml(host, from) {
+// Twilio or SignalWire. SignalWire speaks the same markup and the same stream
+// protocol, down to the event names and the shape of every frame, so the bridge
+// cannot tell the two apart and nothing below this file changes. Two attributes
+// differ: SignalWire wants the codec named, and it paces a bidirectional stream
+// only when asked. Twilio rejects both attributes, so the markup is not shared.
+const CARRIER = (process.env.CARRIER || 'twilio').toLowerCase();
+
+// The caller's number rides along as a custom parameter; both carriers deliver it in
+// the stream's start message, which is the only place the socket can learn who
+// called.
+function twiml(host, from, carrier = CARRIER) {
   const attr = String(from || '').replace(/[<>&"]/g, '');
+  // No realtime="true" on the SignalWire stream. In that mode it paces playback
+  // against a clock and drops whatever arrives ahead of it, and the model writes a
+  // sentence far faster than a sentence takes to say, so the tail of every line was
+  // thrown away. Buffered, the default, plays all of it.
+  const stream =
+    carrier === 'signalwire'
+      ? `<Stream url="wss://${host}/media-stream" codec="PCMU@8000h">`
+      : `<Stream url="wss://${host}/media-stream">`;
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <Stream url="wss://${host}/media-stream">
+    ${stream}
       <Parameter name="from" value="${attr}" />
     </Stream>
   </Connect>
@@ -42,7 +58,13 @@ const server = http.createServer((req, res) => {
 
   if (url.pathname === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, model: process.env.OPENAI_REALTIME_MODEL || 'gpt-realtime' }));
+    res.end(
+      JSON.stringify({
+        ok: true,
+        model: process.env.OPENAI_REALTIME_MODEL || 'gpt-realtime',
+        carrier: CARRIER,
+      }),
+    );
     return;
   }
 
@@ -78,7 +100,12 @@ server.on('upgrade', (req, socket, head) => {
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`callbot listening on :${PORT}`);
-  console.log(`  Twilio Voice webhook -> https://<your-tunnel-host>/incoming-call`);
-});
+// Required by a test rather than run: hand back the pieces and start nothing.
+if (require.main === module) {
+  server.listen(PORT, () => {
+    console.log(`callbot listening on :${PORT} (carrier: ${CARRIER})`);
+    console.log(`  Voice webhook -> https://<your-tunnel-host>/incoming-call`);
+  });
+}
+
+module.exports = { server, twiml, CARRIER };

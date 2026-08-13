@@ -275,3 +275,258 @@ t('regression: every canned script still answers every question it reaches', () 
     }
   }
 });
+
+// ---------- a spoken answer ends in a full stop ----------
+// Found on the first end-to-end call with real audio, 2026-08-12. The model hands
+// over what it heard as a sentence, so the email answer arrived as "gabriel at
+// finosu dot com." and the trailing dot made the address fail its shape test. The
+// bot re-asked, the caller repeated the same words, and every later answer landed
+// in the still-open email field. One character ended the application.
+
+t('regression: an email answer that ends in a full stop is still an email', () => {
+  for (const said of [
+    'gabriel at finosu dot com.',
+    'Gabriel at Finosu.com.',
+    'gabriel@finosu.com.',
+    'my email is gabriel at finosu dot com!',
+    'gabriel at finosu dot com?',
+    'gabriel at finosu dot com,',
+  ]) {
+    assert.strictEqual(P.parseEmail(said), 'gabriel@finosu.com', said);
+    assert.strictEqual(V.validateEmail(said).ok, true, said);
+  }
+});
+
+t('regression: every field survives its answer arriving as a sentence', () => {
+  // The email bug was one field, but the same full stop reaches all of them.
+  for (let k = 0; k < SCRIPTS.APPROVED.length; k++) {
+    const s = intake.startSession({ callSid: 'reg' });
+    let rejected = null;
+    for (let i = 0; i < SCRIPTS.APPROVED.length; i++) {
+      const field = intake.currentField(s);
+      if (!field) break;
+      const said = i === k ? `${SCRIPTS.APPROVED[i].replace(/\.*$/, '')}.` : SCRIPTS.APPROVED[i];
+      const r = intake.submit(s, said);
+      if (i === k && (!r || !r.accepted)) rejected = `${field.key} rejected ${JSON.stringify(said)}`;
+      if (r && r.done) break;
+    }
+    assert.strictEqual(rejected, null, rejected || '');
+  }
+});
+
+// ---------- "no" is an answer, not a request to hang up ----------
+// Also found on that first real call: the model called end_call, with the reason
+// "caller refused to continue", after the caller said nothing but "no" to the
+// deployed-military question. The call ended eight fields in.
+
+t('regression: a bare no is not a request to stop', () => {
+  for (const said of [
+    'no',
+    'No.',
+    'nope',
+    'no, this number is fine',
+    'no I am not deployed',
+    'not right now',
+    'I would rather not say',
+    'checking',
+  ]) {
+    assert.strictEqual(P.saysStop(said), false, said);
+  }
+});
+
+t('regression: an actual request to stop is still recognised', () => {
+  for (const said of [
+    'stop',
+    'I want to stop the call',
+    'can you call me back later',
+    'let me speak to a person',
+    'I want to talk to a human',
+    'take me off your list',
+    'hang up',
+    'never mind, forget it',
+    'I am not interested',
+    'goodbye',
+  ]) {
+    assert.strictEqual(P.saysStop(said), true, said);
+  }
+});
+
+// ---------- a full stop is not part of an address ----------
+// Same root cause as the email bug, seen on the printed form: every free text field
+// came back carrying the sentence's punctuation, so the report read "Employer:
+// Finosu." and "City: San Mateo."
+
+t('regression: free text fields do not keep the sentence full stop', () => {
+  for (const [said, want] of [
+    ['1820 Gateway Drive.', '1820 Gateway Drive'],
+    ['San Mateo.', 'San Mateo'],
+    ['Finosu.', 'Finosu'],
+    ['Engineering.', 'Engineering'],
+    ['1820 Gateway Drive, San Mateo, California.', '1820 Gateway Drive, San Mateo, California'],
+  ]) {
+    const r = V.validateText(said);
+    assert.strictEqual(r.ok, true, said);
+    assert.strictEqual(r.value, want);
+  }
+});
+
+// ---------- spelling an address out loud ----------
+// Found on Jaewoo's own live call, 2026-08-12. Speech recognition heard "Jaywoo"
+// for "Jaewoo", which no parser can fix, so the caller does what people do and
+// spells it. That path was broken twice over: the letter "o" was read as a zero,
+// because ONES maps it that way for phone numbers, and a year said as "two thousand
+// three" came out as the literal "2thousand3".
+
+t('regression: spelling an address letter by letter keeps the letters', () => {
+  assert.strictEqual(
+    P.parseEmail('j a e w o o c h u n g two zero zero three at gmail dot com'),
+    'jaewoochung2003@gmail.com',
+  );
+});
+
+t('regression: a year inside a handle is digits, not words', () => {
+  for (const [said, want] of [
+    ['jaewoo chung two thousand three at gmail dot com', 'jaewoochung2003@gmail.com'],
+    ['mike nineteen ninety four at yahoo dot com', 'mike1994@yahoo.com'],
+    ['sam twenty twenty five at gmail dot com', 'sam2025@gmail.com'],
+  ]) {
+    assert.strictEqual(P.parseEmail(said), want, said);
+  }
+});
+
+// ---------- reading an address back so the error is audible ----------
+// A caller who says the whole address and never spells it cannot catch a
+// misspelling in a whole-word read-back: "jaywoochung2003 at gmail dot com" and the
+// right one sound the same to the person who owns the name. Letters do not.
+
+t('regression: the read-back spells the part before the at sign', () => {
+  const r = V.validateEmail('jaewoochung2003 at gmail dot com');
+  assert.strictEqual(r.value, 'jaewoochung2003@gmail.com');
+  const line = SCRIPTS.FIELD_BY_KEY
+    ? null
+    : require('../src/fields').BY_KEY.email.confirmLine(r.value);
+  assert.match(line, /j a e w o o c h u n g 2 0 0 3/);
+  // the domain is not spelled; nobody mishears gmail
+  assert.match(line, /at gmail dot com/);
+});
+
+// ---------- the name gets spelled back too ----------
+// A name misheard by one letter reads back sounding like the caller's own name,
+// same as the email address, and it is what goes on the loan paperwork.
+
+t('regression: the name read-back spells every letter, and hides the spacing', () => {
+  const field = require('../src/fields').BY_KEY.last_name;
+  const spelled = (whole) => {
+    const [first, ...rest] = whole.split(' ');
+    return field.confirmLine(rest.join(' '), { first_name: first }).split("That's ")[1];
+  };
+  // a stray space is inaudible: one run of letters, no pause to correct
+  assert.strictEqual(spelled('Jae Woo Chung'), spelled('Jaewoo Chung'));
+  assert.match(spelled('Jaewoo Chung'), /j a e w o o c h u n g/);
+  // a wrong letter is audible
+  assert.ok(!/j a e w o o c h u n g/.test(spelled('Jaywoo Chung')));
+});
+
+// A name arriving as spelled letters, which is what the caller does after hearing a
+// wrong one read back. "Jae Woo Chung" with the stray space was the live case.
+t('regression: a spelled name comes back as one word per name', () => {
+  assert.strictEqual(P.parseName('j a e w o o, c h u n g'), 'Jaewoo Chung');
+  assert.strictEqual(P.parseName('j a e w o o and c h u n g'), 'Jaewoo Chung');
+  // a lone initial is not a spelled word
+  assert.strictEqual(P.parseName('J Robert Smith'), 'J Robert Smith');
+});
+
+// ---------- name spacing is a matching problem, not a capture problem ----------
+// The bot read "Jae Woo Chung" back letter by letter and the caller corrected a
+// space. Nothing downstream cares about that space, so the read-back no longer
+// surfaces it, and the record carries the key a lookup actually compares on.
+
+t('regression: names that differ only in spacing share one match key', () => {
+  const F = require('../src/format');
+  const key = (name) =>
+    F.apiPayload({
+      record: { name },
+      outcome: { decision: 'Approved', reasons: [] },
+      transcript: [],
+      capture: {},
+      unresolved: [],
+    }).application.applicant.name_match_key;
+
+  const same = ['Jae Woo Chung', 'Jaewoo Chung', 'Jae-Woo Chung', 'JAEWOO CHUNG'];
+  for (const n of same) assert.strictEqual(key(n), 'jaewoochung', n);
+  assert.notStrictEqual(key('Jaywoo Chung'), 'jaewoochung', 'a real misspelling is not the same person');
+});
+
+t('regression: a name is read back spelled, and a no asks for a spelling', () => {
+  const s = intake.startSession({ callSid: 'reg' });
+  intake.submit(s, 'Jae Woo');
+  const first = intake.submit(s, 'chung');
+  assert.match(first.say, /Okay, Jae Woo Chung\. That's j a e w o o c h u n g\. Is that right\?/);
+  const after = intake.submit(s, 'no');
+  assert.match(after.say, /Spell your first name/);
+  intake.submit(s, 'j a e w o o');
+  const second = intake.submit(s, 'c h u n g');
+  assert.match(second.say, /That's j a e w o o c h u n g/);
+  // and the correction reached the form, not just the read-back
+  intake.submit(s, 'yes');
+  assert.strictEqual(s.record.name, 'Jaewoo Chung');
+});
+
+// ---------- a letter O in a run of digits ----------
+// Speech recognition writes "O21000021" for a routing number read out clearly, and
+// the digit parser saw no digits at all in it.
+
+t('regression: a letter O inside a number is a zero', () => {
+  assert.strictEqual(P.spokenDigits('O21000021'), '021000021');
+  assert.strictEqual(P.spokenDigits('482I'.replace('I', '1')), '4821');
+  assert.strictEqual(V.validateRouting('O21000021').value, '021000021');
+  // and a lone letter is still a letter, which the email address depends on
+  assert.strictEqual(P.parseEmail('j o e at gmail dot com'), 'joe@gmail.com');
+});
+
+// ---------- accented transcriptions ----------
+// Transcription writes a name in its native spelling. The ASCII filter turned each
+// accented letter into a space, so on a live call (Aug 13) "María" reached the
+// record as "Mar A" and "Álvarez-Cruz" as "Lvarez-cruz". NFD plus dropping the
+// combining marks keeps the base letters instead.
+
+t('regression: accented letters survive name parsing', () => {
+  assert.strictEqual(P.parseName('María'), 'Maria');
+  assert.strictEqual(P.parseName('Álvarez-Cruz'), 'Alvarez-cruz');
+  assert.strictEqual(P.parseName('José Muñoz'), 'Jose Munoz');
+  assert.strictEqual(P.parseName('Renée'), 'Renee');
+});
+
+// ---------- the income figure is said back ----------
+// The validator built "about 3,000 dollars a month" from the day it was written,
+// and intake forwarded only spokenNote, so the line was never spoken. On a live
+// call (Aug 13) "3000" was heard as "2000", the caller could not know, and the
+// record declined at the exact-2000 boundary. The note is the only audible copy
+// of the figure the decision runs on.
+
+// ---------- an employer with no phone ----------
+// "My employer doesn't have a phone" was re-asked three times on a live call
+// (Aug 13) and the field left empty, because the phone question had no skip path
+// while SMS, street 2 and department all did.
+
+t('regression: an employer with no phone is a skip, not three re-asks', () => {
+  const turns = SCRIPTS.APPROVED.slice();
+  turns[turns.length - 1] = "my employer doesn't have a phone";
+  const s = play(turns);
+  assert.strictEqual(s.record.employer_phone, 'None');
+});
+
+t('regression: a real employer phone still captures', () => {
+  const s = play(SCRIPTS.APPROVED);
+  assert.strictEqual(s.record.employer_phone, '(650) 862-9110');
+});
+
+t('regression: the income figure comes back as a spoken note', () => {
+  const s = intake.startSession({ callSid: 'reg' });
+  let r;
+  for (let i = 0; i <= 9; i++) r = intake.submit(s, SCRIPTS.APPROVED[i]);
+  assert.ok(r.note && /a month/.test(r.note), `income note not spoken: ${JSON.stringify(r.note)}`);
+  // and the yes/no screening answers right after it stay silent
+  r = intake.submit(s, SCRIPTS.APPROVED[10]);
+  assert.strictEqual(r.note, null, `military yes/no grew a note: ${JSON.stringify(r.note)}`);
+});

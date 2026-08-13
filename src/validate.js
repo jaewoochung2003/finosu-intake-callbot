@@ -84,7 +84,16 @@ function validateRouting(said) {
   if (Object.keys(dir).length && !name) {
     return { ok: false, error: 'that number is not in the Federal Reserve ACH directory' };
   }
-  return { ok: true, value: digits, note: name ? `bank on file: ${name}` : null, bank: name };
+  return {
+    ok: true,
+    value: digits,
+    note: name ? `bank on file: ${name}` : null,
+    // The one thing worth saying out loud mid-call: a wrong routing number that
+    // still passes the check digit usually belongs to a bank the caller has never
+    // heard of, and naming it is how they catch it.
+    spokenNote: name ? `that is ${name}` : null,
+    bank: name,
+  };
 }
 
 // ---------- account number ----------
@@ -137,13 +146,53 @@ function validateAccount(said, context = {}) {
 
 // ---------- everything else ----------
 
+// One half of a name. Two words are allowed on either side, since "Mary Ann" and
+// "van der Berg" are single names with a space in them, but a sentence is not.
+function validateNamePart(said, which) {
+  const name = P.parseName(said);
+  if (!name) return { ok: false, error: `I did not catch a ${which} name` };
+  const parts = name.split(' ').filter(Boolean);
+  if (parts.length > 3) return { ok: false, error: `I need just the ${which} name` };
+  if (name.replace(/[^A-Za-z]/g, '').length < 2) {
+    return { ok: false, error: `that was too short for a ${which} name` };
+  }
+  if (name.length > 40) return { ok: false, error: `that was longer than a ${which} name` };
+  return { ok: true, value: name };
+}
+
 function validateName(said) {
   const name = P.parseName(said);
   if (!name) return { ok: false, error: 'I did not catch a name' };
   const parts = name.split(' ').filter((w) => w.length > 1);
   if (parts.length < 2) return { ok: false, error: 'I need a first and a last name' };
   if (name.length > 70) return { ok: false, error: 'that was longer than a name' };
+  // Spelled back for the same reason the email address is: a name heard wrong comes
+  // back sounding like the caller's own name, and "Jay-woo" read aloud passes for
+  // "Jae-woo". The letters do not. It goes on the loan paperwork, so it is worth
+  // the four seconds.
   return { ok: true, value: name };
+}
+
+// "021000021" -> "0 2 1 0 0 0 0 2 1". A run of digits said as a number is unusable
+// as a check; said one at a time it is exactly the form the caller is reading.
+function spellDigits(text) {
+  return String(text).split('').join(' ');
+}
+
+// "Jaewoo Chung" and "Jae Woo Chung" -> "j a e w o o c h u n g".
+//
+// One run, no pause between the parts, on purpose. Spelling is the only read-back
+// that catches a wrong letter, since a name said whole comes back sounding like the
+// caller's own name whatever it actually says. But grouping the letters the way the
+// name is spaced puts the spacing up for correction too, and spacing is not worth
+// correcting: nothing downstream compares on it. Run together, a wrong letter is
+// audible and a stray space is not.
+function spellWords(text) {
+  return String(text)
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '')
+    .split('')
+    .join(' ');
 }
 
 function validateEmail(said) {
@@ -153,7 +202,22 @@ function validateEmail(said) {
     return { ok: false, error: 'that did not come through as an email address' };
   }
   if (email.length > 100) return { ok: false, error: 'that was longer than an email address' };
-  return { ok: true, value: email, note: `read back as ${email}` };
+  return { ok: true, value: email };
+}
+
+// The part before the @ is read back one letter at a time, and this is the only
+// field where that is worth the seconds it costs. Said whole, a wrong address sounds
+// exactly like a right one: a caller who hears "jaywoochung2003 at gmail dot com"
+// read back cannot hear the misspelling, because their own name is what they expect
+// to hear. Letters have no such cover. The domain stays whole, since gmail and yahoo
+// are not what gets misheard.
+function spellEmail(email) {
+  const [local, domain] = String(email).split('@');
+  const spelled = local
+    .split('')
+    .map((c) => (c === '.' ? 'dot' : c === '_' ? 'underscore' : c === '-' ? 'dash' : c))
+    .join(' ');
+  return `${spelled}, at ${String(domain || '').replace(/\./g, ' dot ')}`;
 }
 
 function validateDob(said, asOf) {
@@ -206,7 +270,14 @@ function validateState(said) {
 }
 
 function validateText(said, opts = {}) {
-  const clean = String(said == null ? '' : said).replace(/\s+/g, ' ').trim();
+  const clean = String(said == null ? '' : said)
+    .replace(/\s+/g, ' ')
+    .trim()
+    // What the model hands over is a sentence, so a free text field kept the full
+    // stop and the form read "Employer: Finosu." An address or an employer name
+    // never ends in one, and the printed form is what a person reads.
+    .replace(/[.!?,;:]+$/, '')
+    .trim();
   if (clean.length < (opts.min || 2)) return { ok: false, error: 'I did not catch that' };
   if (clean.length > (opts.max || 120)) return { ok: false, error: 'that was longer than I can take' };
   return { ok: true, value: clean };
@@ -215,7 +286,10 @@ function validateText(said, opts = {}) {
 function validateYesNo(said) {
   const answer = P.parseYesNo(said);
   if (answer === null) return { ok: false, error: 'I need a yes or a no' };
-  return { ok: true, value: answer, note: answer ? 'yes' : 'no' };
+  // No note: with notes now spoken, echoing "yes" back at a yes/no answer reads as
+  // the bot talking to itself. Notes are for values the caller could not otherwise
+  // hear were misheard — the income figure, the bank name.
+  return { ok: true, value: answer, note: null };
 }
 
 function validateEnum(said, options, synonyms) {
@@ -288,7 +362,10 @@ function validateIncomeOver(said, threshold, payFrequency) {
   }
   const answer = P.parseYesNo(said);
   if (answer === null) return { ok: false, error: 'I need a yes or a no' };
-  return { ok: true, value: answer, note: answer ? 'yes' : 'no' };
+  // No note: with notes now spoken, echoing "yes" back at a yes/no answer reads as
+  // the bot talking to itself. Notes are for values the caller could not otherwise
+  // hear were misheard — the income figure, the bank name.
+  return { ok: true, value: answer, note: null };
 }
 
 function frequencyMultiplier(freq) {
@@ -334,6 +411,10 @@ module.exports = {
   validateRouting,
   validateAccount,
   validateName,
+  validateNamePart,
+  spellWords,
+  spellEmail,
+  spellDigits,
   validateEmail,
   validateDob,
   validateSsn4,

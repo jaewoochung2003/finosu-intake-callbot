@@ -15,6 +15,7 @@ const files = [
   './changes.test.js',
   './regressions.test.js',
   './bridge.test.js',
+  './carrier.test.js',
 ];
 
 let queue = [];

@@ -172,33 +172,26 @@ The transcript and the capture record already mask them.
 
 These are open, not decided.
 
-1. **No inactivity timer.** A caller who puts the phone down to find their routing
-   number leaves the OpenAI socket open and billing, and hears nothing. Agreed
-   design, roughly 25 lines in `bridge.js`: one clock, reset by any sound from
-   either side, suspended while a keypad entry is part-typed, started when Twilio
-   finishes *playing* the question rather than when the audio is sent.
-
-   Nudge at 10 seconds. Hang up at 45 only if the caller has made no sound at all
-   since the nudge; if they made any sound, the deadline moves to 5 minutes. The
-   nudge is a test for whether a person is on the line, not a nag: someone hunting
-   for a paper statement says "hang on", and that noise buys them the long window.
-
-   **These numbers are not settled and should be tuned against real calls.** They
-   are reasoned, not measured. The per-field timings in `capture_metrics` are the
-   measurement: after a few dozen calls the threshold should come from a percentile
-   of observed time-to-answer per field, since "what is your name" and "read me your
-   account number" are not the same wait. Both values live in `.env`
-   (`SILENCE_NUDGE_MS`, `SILENCE_HANGUP_MS`) so moving them is not a code change.
+1. **The quiet-line timers are reasoned, not measured.** The timer itself is in:
+   20 seconds of quiet gets one "are you still there?", 50 ends the call with a
+   goodbye and emails the form so far as Incomplete. A keypad press counts as
+   activity, so nobody is hung up on mid-entry. What stays open is the numbers:
+   they are constants in `bridge.js` (`QUIET_NUDGE_MS`, `QUIET_END_MS`), and the
+   per-field timings in `capture_metrics` are how they should be set — after a few
+   dozen calls the threshold should come from a percentile of observed
+   time-to-answer per field, since "what is your name" and "read me your account
+   number" are not the same wait.
 2. **No human handoff.** The prompt lets a caller ask for a person and `end_call`
    ends the application. There is no `<Dial>` leg because there is no number to dial.
 3. **No call-back resume.** A four-minute call that drops at question 20 starts over
    at question 1.
-4. **Nothing has run against a live OpenAI Realtime session.** The session
-   configuration, the audio format objects and the function-call event names are
-   written from the documentation. `test/bridge.test.js` drives the whole state
-   machine with fake sockets carrying the documented message shapes, which covers
-   the logic but proves nothing about the shapes themselves. One real call settles
-   it.
+4. **Live coverage is thin.** Real calls have run end to end, and most of the bugs
+   they found were things no stubbed test could reach: the model's exact phrasing,
+   transcription artifacts, a line that goes quiet, an accented transcription of a
+   name. Two calls at once have run: each kept its own state and both records were
+   written. Two paths have still never run against a live session: a caller who
+   answers a spoken confirmation by typing on the keypad instead of speaking, and
+   the give-up path meeting the knockout path outside the canned scripts.
 5. **No transcript is stored.** Transcription is enabled in the session config and
    nothing keeps the output, so there is no record of what the caller actually said
    next to what was captured.

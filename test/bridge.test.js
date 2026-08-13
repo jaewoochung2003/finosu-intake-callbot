@@ -47,7 +47,7 @@ class FakeSocket {
 
 // Stands up one call with both sockets faked and returns everything a test needs
 // to drive it.
-function startCall({ callsDir } = {}) {
+function startCall({ callsDir, quietNudgeMs, quietEndMs, goodbyeMs } = {}) {
   const twilio = new FakeSocket();
   const openai = new FakeSocket();
   const emails = [];
@@ -60,6 +60,9 @@ function startCall({ callsDir } = {}) {
       return { sent: true, via: 'test', id: 'x' };
     },
     callsDir: callsDir || fs.mkdtempSync(path.join(os.tmpdir(), 'callbot-')),
+    ...(quietNudgeMs ? { quietNudgeMs } : {}),
+    ...(quietEndMs ? { quietEndMs } : {}),
+    ...(goodbyeMs ? { goodbyeMs } : {}),
   });
 
   openai.emit('open');
@@ -128,7 +131,7 @@ t('the session is configured and the greeting is asked for', () => {
   );
   const greet = openai.ofType('response.create')[0];
   assert.match(greet.response.instructions, /Thanks for calling Finosu/);
-  assert.match(greet.response.instructions, /full name/);
+  assert.match(greet.response.instructions, /first name/);
 });
 
 // ---------- audio ----------
@@ -157,12 +160,39 @@ t('model audio is forwarded to Twilio with a mark behind it', () => {
   assert.strictEqual(twilio.ofEvent('mark').length, 1);
 });
 
-t('the caller talking over the bot clears the queued audio', () => {
+t('the caller talking over the bot clears the queued audio', async () => {
   const { twilio, openai } = startCall();
+  openai.emit('message', JSON.stringify({ type: 'response.created' }));
   openai.emit('message', JSON.stringify({ type: 'response.output_audio.delta', delta: 'BBBB' }));
+  await sleep(750); // past the grace window that ignores noise at the start of a line
   openai.emit('message', JSON.stringify({ type: 'input_audio_buffer.speech_started' }));
   assert.strictEqual(twilio.ofEvent('clear').length, 1);
   assert.strictEqual(openai.ofType('response.cancel').length, 1);
+});
+
+// Line hiss at the moment the bot opens its mouth was reading as an interruption,
+// and each one dropped the audio already queued at the carrier, so every sentence
+// stopped halfway through.
+t('noise in the first moment of a line is not an interruption', () => {
+  const { twilio, openai } = startCall();
+  openai.emit('message', JSON.stringify({ type: 'response.created' }));
+  openai.emit('message', JSON.stringify({ type: 'response.output_audio.delta', delta: 'BBBB' }));
+  openai.emit('message', JSON.stringify({ type: 'input_audio_buffer.speech_started' }));
+  assert.strictEqual(twilio.ofEvent('clear').length, 0);
+});
+
+// The API answers a cancel with an error when nothing is generating, and it was
+// answering one on every single turn, which drowned the log a person reads after a
+// call that went wrong.
+t('nothing is cancelled when the model is not talking', async () => {
+  const { twilio, openai } = startCall();
+  openai.emit('message', JSON.stringify({ type: 'response.created' }));
+  openai.emit('message', JSON.stringify({ type: 'response.output_audio.delta', delta: 'BBBB' }));
+  openai.emit('message', JSON.stringify({ type: 'response.done', response: { output: [] } }));
+  await sleep(750);
+  openai.emit('message', JSON.stringify({ type: 'input_audio_buffer.speech_started' }));
+  assert.strictEqual(twilio.ofEvent('clear').length, 1, 'queued audio still has to be dropped');
+  assert.strictEqual(openai.ofType('response.cancel').length, 0);
 });
 
 t('nothing is sent to Twilio before the stream has started', () => {
@@ -176,15 +206,20 @@ t('nothing is sent to Twilio before the stream has started', () => {
 
 // ---------- tool calls ----------
 
-t('an answer comes back as a tool output and the next question', () => {
+t('an answer comes back as a tool output and the next line to say', () => {
   const { openai, say, lastToolResult } = startCall();
-  say('my name is Gabriel Kim');
+  say('Gabriel');
   const out = openai.sent.filter((m) => m.item && m.item.type === 'function_call_output');
   assert.strictEqual(out.length, 1);
   assert.strictEqual(out[0].item.call_id, 'call_1');
   const r = lastToolResult();
   assert.strictEqual(r.accepted, true);
-  assert.match(r.say_next, /email address/);
+  assert.match(r.say_next, /last name/);
+  // the whole name is read back once the second half lands
+  say('Kim');
+  assert.match(lastToolResult().say_next, /Okay, Gabriel Kim\. That's g a b r i e l k i m\. Is that right\?/);
+  say('yes');
+  assert.match(lastToolResult().say_next, /email address/);
   // and the model is told to speak again
   assert.ok(openai.ofType('response.create').length >= 2);
 });
@@ -216,18 +251,26 @@ t('the same call_id arriving twice is answered once', () => {
 
 t('a bad answer comes back with the reason, not a blank re-ask', () => {
   const { say, lastToolResult } = startCall();
-  say('Gabriel'); // one name only
+  say('mmm'); // nothing a name could be built from
   const r = lastToolResult();
   assert.strictEqual(r.accepted, false);
-  assert.match(r.problem, /first and a last name/);
+  assert.match(r.problem, /did not catch a first name/);
 });
 
-t('read_back is set on the fields the caller has to be able to check', () => {
+// The four values nothing else can check are read back and waited on: a name and an
+// email have no checksum, an account number has no check digit, and a routing number
+// can pass every check and still belong to the wrong bank.
+t('the fields nothing can check are read back and wait for a yes', () => {
   const { say, lastToolResult } = startCall();
-  say('Gabriel Kim');
-  assert.strictEqual(lastToolResult().read_back, false);
+  say('Gabriel');
+  say('Kim');
+  assert.match(lastToolResult().say_next, /Is that right\?$/);
+  say('yes');
   say('gabriel at finosu dot com');
-  assert.strictEqual(lastToolResult().read_back, true, 'email should be read back');
+  assert.match(lastToolResult().say_next, /g a b r i e l, at finosu dot com\. Is that right\?$/);
+  // a no sends it back to the same question, spelled this time
+  say('no');
+  assert.match(lastToolResult().say_next, /Spell the part before the at sign/);
 });
 
 t('an unknown tool name does not throw', () => {
@@ -248,6 +291,8 @@ t('an unknown tool name does not throw', () => {
 // ---------- keypad ----------
 
 // Walks the call to a named field by answering everything before it.
+// Plays the canned answers up to `index`. The canned script carries the read-back
+// confirmations as turns of their own, so this walks the same path a caller does.
 function walkTo(call, index) {
   for (const line of SCRIPTS.APPROVED.slice(0, index)) call.say(line);
 }
@@ -270,6 +315,7 @@ t('the hash key submits a short entry early', () => {
   const call = startCall();
   walkTo(call, SCRIPTS.INDEX.account);
   call.press('5512340987#');
+  call.say('yes'); // the account number is read back
   const said = call.openai
     .ofType('response.create')
     .map((m) => m.response?.instructions || '')
@@ -319,7 +365,9 @@ t('a spoken answer that moves the form on discards a stale keypad buffer', () =>
   // The idle timer would otherwise commit "0210" against the account number.
   const r = call.lastToolResult();
   assert.strictEqual(r.accepted, true);
-  assert.match(r.say_next, /account number/i);
+  assert.match(r.say_next, /Is that right\?$/);
+  call.say('yes');
+  assert.match(call.lastToolResult().say_next, /account number/i);
 });
 
 // ---------- end of call ----------
@@ -347,8 +395,11 @@ t('hanging up writes the record and sends exactly one email', async () => {
 t('hanging up mid-call still reports, as Incomplete', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'callbot-'));
   const call = startCall({ callsDir: dir });
-  call.say('Gabriel Kim');
+  call.say('Gabriel');
+  call.say('Kim');
+  call.say('yes');
   call.say('gabriel at finosu dot com');
+  call.say('yes');
   call.hangUp();
   await new Promise((r) => setTimeout(r, 20));
 
@@ -420,4 +471,157 @@ t('an ordinary answer is still readable in the log', () => {
     console.log = realLog;
   }
   assert.ok(lines.join('\n').includes('gabriel at finosu dot com'));
+});
+
+// ---------- hanging up is the server's call, not the model's ----------
+// On the first end-to-end call with real audio the model called end_call, reason
+// "caller refused to continue with providing the email address", after the caller
+// had said one word: "no", answering the deployed-military question. The call ended
+// eight fields in and the report went out empty. The caller's own words now decide.
+
+function hears(call, transcript) {
+  call.openai.emit(
+    'message',
+    JSON.stringify({
+      type: 'conversation.item.input_audio_transcription.completed',
+      transcript,
+    }),
+  );
+}
+
+function endCall(call, reason) {
+  call.openai.emit(
+    'message',
+    JSON.stringify({
+      type: 'response.function_call_arguments.done',
+      call_id: `end_${Math.random().toString(36).slice(2)}`,
+      name: 'end_call',
+      arguments: JSON.stringify({ reason }),
+    }),
+  );
+}
+
+t('end_call is refused when the caller only answered no', () => {
+  const call = startCall();
+  call.say('Gabriel');
+  call.say('Kim');
+  call.say('yes'); // the name read-back
+  hears(call, 'No.');
+  endCall(call, 'caller refused to continue');
+  const r = call.lastToolResult();
+  assert.strictEqual(r.accepted, false);
+  assert.match(r.problem, /did not ask to stop/);
+  // and the call is still going, on the question it was already on
+  assert.match(r.say_next, /email address/);
+  assert.strictEqual(call.emails.length, 0, 'a refused end_call must not send the report');
+});
+
+t('end_call goes through when the caller asks to stop', () => {
+  const call = startCall();
+  call.say('Gabriel');
+  call.say('Kim');
+  call.say('yes');
+  hears(call, 'Actually can you call me back later');
+  endCall(call, 'caller asked to be called back');
+  const r = call.lastToolResult();
+  assert.strictEqual(r.done, true);
+});
+
+// ---------- the words the bot says are the server's words ----------
+// A caller talking over the bot cancels the response that the save_answer call was
+// riding in, so the answer never reaches the server while the model goes on as if it
+// had. The model then asks the next question, the server files the reply under the
+// last one, and the two never meet again. Every line after a tool call is dictated.
+
+t('the next question is handed to the model, not left to it', () => {
+  const { openai, say } = startCall();
+  say('Gabriel');
+  say('Kim');
+  say('yes');
+  const spoken = openai.ofType('response.create').pop();
+  assert.ok(spoken.response && spoken.response.instructions, 'the model was left to improvise');
+  assert.match(spoken.response.instructions, /email address/);
+});
+
+t('a rejected answer is re-asked in the server\'s words, with the problem', () => {
+  const { openai, say } = startCall();
+  say('Gabriel');
+  say('Kim');
+  say('yes'); // the name read-back
+  say('that is not an email');
+  const spoken = openai.ofType('response.create').pop();
+  assert.match(spoken.response.instructions, /did not come through as an email/);
+  assert.match(spoken.response.instructions, /email address/);
+});
+
+
+// ---------- silence is not an answer ----------
+// Speech recognition writes "Thank you." when it is handed line noise, and the model
+// passed that on as the applicant's name. Nothing was said, so nothing is recorded
+// and the question is asked again.
+
+t('a save that came from silence is ignored, and the question stands', () => {
+  const call = startCall();
+  for (const phantom of ['Thank you.', 'Bye.', 'Thanks for watching!', 'you']) {
+    call.say(phantom);
+    const r = call.lastToolResult();
+    assert.strictEqual(r.accepted, false, phantom);
+    assert.match(r.say_next, /first name/, phantom);
+  }
+  // and a real answer to the same question still lands
+  call.say('Gabriel');
+  call.say('Kim');
+  const ok = call.lastToolResult();
+  assert.strictEqual(ok.accepted, true);
+  assert.match(ok.say_next, /Is that right\?$/);
+  call.say('yes');
+  assert.match(call.lastToolResult().say_next, /email address/);
+});
+
+// ---------- a caller who stops talking ----------
+// Nothing ended a silent call. A caller who put the phone down held an open line and
+// a paid model session until the process was killed, and one who simply went quiet
+// heard nothing back, on a live call, for two minutes.
+
+t('a quiet line gets asked once, then let go', async () => {
+  const call = startCall({ quietNudgeMs: 60, quietEndMs: 200, goodbyeMs: 20 });
+  const spoken = () =>
+    call.openai
+      .ofType('response.create')
+      .map((m) => m.response?.instructions || '')
+      .join(' ');
+
+  await sleep(200);
+  assert.match(spoken(), /Are you still there\?/);
+  await sleep(400);
+  assert.match(spoken(), /let you go/);
+  await sleep(120);
+  assert.strictEqual(call.emails.length, 1, 'the form so far still goes out');
+});
+
+t('a caller who is talking is never nudged', async () => {
+  const call = startCall({ quietNudgeMs: 120, quietEndMs: 400 });
+  for (let i = 0; i < 6; i++) {
+    call.openai.emit('message', JSON.stringify({ type: 'input_audio_buffer.speech_started' }));
+    await sleep(40);
+  }
+  const spoken = call.openai
+    .ofType('response.create')
+    .map((m) => m.response?.instructions || '')
+    .join(' ');
+  assert.ok(!/still there/.test(spoken), spoken);
+});
+
+t('typing counts as being there', async () => {
+  const call = startCall({ quietNudgeMs: 120, quietEndMs: 400, goodbyeMs: 20 });
+  walkTo(call, SCRIPTS.INDEX.ssn);
+  for (const d of '4821') {
+    call.press(d);
+    await sleep(50);
+  }
+  const spoken = call.openai
+    .ofType('response.create')
+    .map((m) => m.response?.instructions || '')
+    .join(' ');
+  assert.ok(!/still there/.test(spoken), 'nudged a caller who was typing');
 });

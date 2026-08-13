@@ -40,10 +40,8 @@ const MAX_ATTEMPTS = 3;
 // either sits in dead air or hangs up. Saying it in the first ten seconds costs a
 // sentence and buys the caller the whole rest of the call to get ready.
 const GREETING =
-  'Thanks for calling Finosu. I can take your loan application right now, it runs about ' +
-  'four minutes. Two things to have handy: your bank routing and account numbers, which ' +
-  'are in your banking app under account details, and the last four of your social. ' +
-  'Anything you tell me is used to decide on the loan and nothing else.';
+  'Thanks for calling Finosu. I can take your loan application right now. Have your ' +
+  "routing and account numbers handy, plus the last four of your social, and we'll get started.";
 
 function startSession(opts = {}) {
   const now = Date.now();
@@ -63,6 +61,10 @@ function startSession(opts = {}) {
     // Answers the caller went back and changed.
     corrections: [],
     askedAt: now,
+    // A captured value waiting for the caller to say yes or no to it. Only the two
+    // fields nothing can check hold one: a name and an email address have no check
+    // digit, no directory and no shape, so the caller is the only test there is.
+    pending: null,
     state: 'in_progress', // in_progress | complete
     outcome: null,
   };
@@ -131,6 +133,8 @@ function submit(session, said, opts = {}) {
     return { accepted: false, done: true, say: null, decision: session.outcome };
   }
 
+  if (session.pending) return resolveConfirmation(session, said);
+
   const field = currentField(session);
   if (!field) return complete(session);
 
@@ -147,7 +151,7 @@ function submit(session, said, opts = {}) {
   if (field.optional && field.skipOn && field.skipOn(said)) {
     session.record[field.key] = field.skipValue;
     noteCapture(session, field, { raw: said, value: field.skipValue, source: 'skip' });
-    return step(session, { accepted: true, note: null });
+    return step(session, { accepted: true });
   }
 
   const result = field.validate(said, session.record);
@@ -215,14 +219,100 @@ function submit(session, said, opts = {}) {
   const knocked = maybeKnockout(session, field);
   if (knocked) return knocked;
 
-  // Fields marked `confirm` carry a read-back instruction to the model. Without
-  // this the flag sat in fields.js and nothing read it, so the email address and
-  // the bank numbers were never actually said back to the caller.
-  return step(session, {
-    accepted: true,
-    note: result.note || null,
-    readBack: !!field.confirm,
+  // A field marked `confirm` does not advance yet. The value is read back and the
+  // call sits on this question until the caller says yes, which is the whole point:
+  // reading a value back and asking the next question in the same breath means the
+  // "that's right" lands in the next field. That is what happened on the 9:50 call,
+  // where a yes about an email address was parsed as a date of birth.
+  if (field.confirm) {
+    session.pending = { key: field.key, value: result.value, tries: 0 };
+    session.askedAt = Date.now();
+    return {
+      accepted: true,
+      say: `${confirmLine(field, result.value, session.record)} Is that right?`,
+      confirming: true,
+      done: false,
+    };
+  }
+
+  // Validators name the read-aloud line either spokenNote (bank name) or note (the
+  // income figure). Only spokenNote was forwarded for a while, so the income
+  // read-back existed and was never said — and a caller whose "3000" was heard as
+  // "2000" found out from the decline email.
+  return step(session, { accepted: true, note: result.spokenNote || result.note || null });
+}
+
+// Yes, no, or a correction. A caller who hears their name back wrong rarely answers
+// "no" on its own; they say the right one. So an answer that is neither yes nor no is
+// tried as a fresh answer to the same question, and only if that fails does the bot
+// ask again. Two unclear turns and it takes what it has, because a loop that cannot
+// be escaped is worse than a value the email report shows as captured.
+// A field can be marked for confirmation without spelling out how to say it back.
+// Falling back beats throwing: the crash landed mid-call, on a live line.
+function confirmLine(field, value, record) {
+  return field.confirmLine ? field.confirmLine(value, record || {}) : `I have ${value}.`;
+}
+
+function resolveConfirmation(session, said) {
+  const pending = session.pending;
+  const field = FIELDS.find((f) => f.key === pending.key);
+  const answer = P.parseYesNo(said);
+
+  session.transcript.push({
+    at: new Date().toISOString(),
+    field: field.key,
+    said: V.redact(field.key, said),
+    source: 'confirm',
   });
+
+  if (answer === true) {
+    session.pending = null;
+    return step(session, { accepted: true });
+  }
+
+  if (answer === false) {
+    session.pending = null;
+    // One read-back can cover more than one question: the name is asked in two
+    // halves and confirmed as a whole. Clearing only the half that was confirmed
+    // sent the re-spelled whole name into the last name field, and the read-back
+    // came back "Jae Woo Jaewoo Chung".
+    const covers = field.confirmCovers || [field.key];
+    for (const key of covers) delete session.record[key];
+    if (field.derive) for (const key of Object.keys(field.derive('', {}))) delete session.record[key];
+    session.index = FIELDS.findIndex((f) => f.key === covers[0]);
+    session.attempts = 0;
+    session.askedAt = Date.now();
+    return {
+      accepted: false,
+      say: field.respell || `Sorry about that. ${currentField(session).ask}`,
+      done: false,
+    };
+  }
+
+  // Not a yes or a no. Take it as the corrected answer if it reads as one.
+  const retry = field.validate(said, session.record);
+  if (retry.ok && retry.value !== pending.value) {
+    session.record[field.key] = retry.value;
+    noteCapture(session, field, { raw: said, value: retry.value, source: 'speech' });
+    session.pending = { key: field.key, value: retry.value, tries: 0 };
+    return {
+      accepted: true,
+      say: `${confirmLine(field, retry.value, session.record)} Is that right?`,
+      confirming: true,
+      done: false,
+    };
+  }
+
+  pending.tries += 1;
+  if (pending.tries >= 2) {
+    session.pending = null;
+    return step(session, { accepted: true });
+  }
+  return {
+    accepted: false,
+    say: `Sorry, was that a yes or a no? ${confirmLine(field, pending.value, session.record)} Is that right?`,
+    done: false,
+  };
 }
 
 // The screening block is checked once, after all five questions have been put to
@@ -234,13 +324,13 @@ function maybeKnockout(session, field) {
   return fired.length ? finishWith(session, 'Declined', fired) : null;
 }
 
-function step(session, { accepted, note, readBack }) {
+function step(session, { accepted, note }) {
   session.attempts = 0;
   session.index += 1;
   const field = currentField(session);
   if (!field) return complete(session);
   session.askedAt = Date.now();
-  return { accepted, note, readBack: !!readBack, say: field.ask, done: false };
+  return { accepted, note: note || null, say: field.ask, done: false };
 }
 
 function complete(session) {
@@ -257,9 +347,9 @@ function finishWith(session, decision, reasons, spoken) {
     spoken:
       spoken ||
       (decision === 'Declined'
-        ? 'Based on what you have told me, we are not able to move forward with a loan today. ' +
-          'You will get an email with the details.'
-        : 'All set. You will get an email confirming what I have.'),
+        ? "Based on what you've told me, we can't move forward with a loan today. " +
+          "You'll get an email with the details."
+        : "That's everything I need. You'll get an email with what I've got."),
   };
   finish(session, outcome);
   return { accepted: true, done: true, say: outcome.spoken, decision: outcome };
@@ -273,6 +363,11 @@ function finishWith(session, decision, reasons, spoken) {
 // from someone who said it once, and only the correction log knows which is which.
 function undoLast(session) {
   if (session.state !== 'in_progress') return null;
+  // Going back while a read-back is waiting means the caller wants THIS answer
+  // again, not the one before it: the value is captured but unconfirmed, and the
+  // form has not moved on yet.
+  const wasPending = session.pending !== null;
+  session.pending = null;
   // Walk back to the last question that was actually put to the caller.
   //
   // "Put to the caller" is session.capture, not session.record. Two things live in
@@ -282,7 +377,7 @@ function undoLast(session) {
   // never heard. Walking on appliesWhen alone has the opposite fault: the income
   // backstop's appliesWhen goes false the moment it is answered, so its answer was
   // unreachable and got deleted as collateral when the walk passed over it.
-  let i = session.index - 1;
+  let i = wasPending ? session.index : session.index - 1;
   while (i >= 0) {
     const field = FIELDS[i];
     if (session.capture[field.key] !== undefined) break;

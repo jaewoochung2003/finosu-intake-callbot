@@ -126,9 +126,10 @@ t('under 18 ends it immediately', () => {
 t('three bad answers moves on and leaves the field out', () => {
   const s = intake.startSession({ callSid: 'test' });
   for (let i = 0; i < 3; i++) intake.submit(s, 'mmm');
-  assert.ok(s.unresolved.includes('name'));
-  assert.strictEqual(s.record.name, undefined);
-  assert.strictEqual(intake.currentField(s).key, 'email');
+  assert.ok(s.unresolved.includes('first_name'));
+  assert.strictEqual(s.record.first_name, undefined);
+  // the other half is still worth asking for
+  assert.strictEqual(intake.currentField(s).key, 'last_name');
 });
 
 t('an unresolved required field makes the call Incomplete, not Declined', () => {
@@ -141,8 +142,11 @@ t('an unresolved required field makes the call Incomplete, not Declined', () => 
 
 t('back steps to the previous question and clears it', () => {
   const s = intake.startSession({ callSid: 'test' });
-  intake.submit(s, 'Gabriel Kim');
+  intake.submit(s, 'Gabriel');
+  intake.submit(s, 'Kim');
+  intake.submit(s, 'yes'); // the name is read back before the call moves on
   intake.submit(s, 'gabriel at finosu dot com');
+  intake.submit(s, 'yes');
   assert.strictEqual(s.record.email, 'gabriel@finosu.com');
   const back = intake.undoLast(s);
   assert.ok(back);
@@ -238,8 +242,11 @@ t('the subject line names the caller and the outcome', () => {
 
 t('the HTML body escapes what came off the call', () => {
   const s = intake.startSession({ callSid: 'test' });
-  intake.submit(s, 'Gabriel Kim');
+  intake.submit(s, 'Gabriel');
+  intake.submit(s, 'Kim');
+  intake.submit(s, 'yes');
   intake.submit(s, 'gabriel at finosu dot com');
+  intake.submit(s, 'yes');
   s.record.city = '<script>alert(1)</script>';
   intake.complete(s);
   const html = format.emailHtml(s);

@@ -16,16 +16,22 @@ HOW THE CALL WORKS
 - When the caller answers, call save_answer with what you heard, word for word,
   including the filler. Do not clean it up, do not correct it, do not convert
   spoken numbers into digits. The server does all of that.
+- This holds hardest for email addresses. If the caller says "jaewoo chung two
+  thousand three at gmail dot com", that is what you pass. Never assemble it into
+  jaewoochung2003@gmail.com yourself, and never fill in a spelling you did not
+  hear because the name and the year make one look obvious. A guess that happens
+  to read back cleanly is how a decision letter goes to a stranger.
 - The tool result tells you whether it was accepted. If it was not, it gives you a
   "problem" and a new line in "say_next". Say the problem briefly and then the
   question again.
 - If the result carries a "note", work it into your next line so the caller can
   catch an error. Example: the routing number comes back with the bank's name, so
   say "Got it, that's Bank of America" before the next question.
-- If the result carries "read_back": true, say the captured value back before you
-  ask the next question, and read any run of digits one digit at a time. Keep going
-  unless the caller objects; you are giving them a chance to catch an error, not
-  asking permission.
+- If the result carries "read_back": true, the "say_next" line ends by asking the
+  caller if it is right. Say it as written — digits one at a time, spelled letters
+  one at a time — ask the question, and stop there. The next thing the caller says
+  is their yes, their no, or their correction, and the server reads it as exactly
+  that, so never roll into the next question on the same turn.
 - If the caller says something you just took down was wrong, call redo_previous.
 - If the caller hangs up on the conversation, refuses to continue, or asks to speak
   to a person, call end_call with a short reason.
@@ -43,6 +49,12 @@ WHAT YOU NEVER DO
 HOW YOU SOUND
 - Short. One question per turn, usually one sentence.
 - Warm but moving. No "great!", no "perfect!", no praise for answering a question.
+- Contractions, always: "what's", "you're", "that's". Written-out forms sound like
+  a script being read.
+- Vary your acknowledgements: okay, got it, alright, thanks. Never the same one
+  twice in a row, and none at all is fine too.
+- Plain words. "Before we go on", never "before we proceed". "Need", never
+  "require".
 - Numbers get read back a digit at a time when you read them back at all.
 - If the caller goes quiet for a while, ask if they are still there, once.
 `.trim();
@@ -100,9 +112,18 @@ function sessionUpdate({ model, voice, temperature }) {
       audio: {
         input: {
           format: { type: 'audio/pcmu' },
+          // A phone line is never silent. At 0.55 the detector called the hiss on
+          // an open line speech, which did two things on a live call: it dropped the
+          // audio already queued at the carrier, so every sentence stopped halfway,
+          // and it handed the transcriber a stretch of noise, which came back as
+          // "Thank you." and "Bye." Those are what Whisper writes when it is given
+          // nothing, and the model answered them as if the caller had spoken.
+          // near_field for a handset held to an ear, far_field for a speakerphone or
+          // a car. A caller could be on either, so it is a setting.
+          noise_reduction: { type: process.env.NOISE_REDUCTION || 'near_field' },
           turn_detection: {
             type: 'server_vad',
-            threshold: 0.55,
+            threshold: 0.8,
             prefix_padding_ms: 300,
             // Long enough that a caller reading a nine digit routing number out
             // loud is not cut off between groups of digits.
