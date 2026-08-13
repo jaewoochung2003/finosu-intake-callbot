@@ -81,7 +81,33 @@ function startCall({ callsDir, quietNudgeMs, quietEndMs, goodbyeMs } = {}) {
   );
 
   let callId = 0;
+  // A real turn is two events: the caller's audio comes back transcribed, and THEN
+  // the model files it with save_answer. The helper used to send only the tool call,
+  // which meant every test drove a path no phone call can produce, and the server had
+  // no way to tell a filed answer from an invented one. It sends both now.
   const say = (answer) => {
+    callId += 1;
+    openai.emit(
+      'message',
+      JSON.stringify({
+        type: 'conversation.item.input_audio_transcription.completed',
+        transcript: String(answer),
+      }),
+    );
+    openai.emit(
+      'message',
+      JSON.stringify({
+        type: 'response.function_call_arguments.done',
+        call_id: `call_${callId}`,
+        name: 'save_answer',
+        arguments: JSON.stringify({ answer }),
+      }),
+    );
+    return `call_${callId}`;
+  };
+  // The model filing an answer with no caller turn behind it, which is what
+  // fabrication looks like on the wire.
+  const saysNothingButModelSaves = (answer) => {
     callId += 1;
     openai.emit(
       'message',
@@ -114,7 +140,7 @@ function startCall({ callsDir, quietNudgeMs, quietEndMs, goodbyeMs } = {}) {
     return outs.length ? JSON.parse(outs[outs.length - 1].item.output) : null;
   };
 
-  return { twilio, openai, emails, say, press, hangUp, lastToolResult };
+  return { twilio, openai, emails, say, saysNothingButModelSaves, press, hangUp, lastToolResult };
 }
 
 // ---------- opening ----------
@@ -275,7 +301,29 @@ t('the fields nothing can check are read back and wait for a yes', () => {
   assert.match(lastToolResult().say_next, /g a b r i e l, at finosu dot com\. Is that right\?$/);
   // a no sends it back to the same question, spelled this time
   say('no');
-  assert.match(lastToolResult().say_next, /Spell the part before the at sign/);
+  assert.match(lastToolResult().say_next, /Spell the whole address/);
+});
+
+t('the model cannot file an answer the caller never gave', () => {
+  // On a live call the caller said nothing usable, the transcriber wrote "You" twice,
+  // and the model filed a date of birth of June 1st 1990 the applicant had never said.
+  // The prompt has always forbidden inventing an answer; this is the server refusing
+  // to accept one.
+  const { say, saysNothingButModelSaves, lastToolResult } = startCall();
+  say('Gabriel');
+  say('Kim');
+  say('yes');
+  say('gabriel at finosu dot com');
+  say('yes');
+  // Now the bot has asked for the date of birth and the caller has said nothing.
+  saysNothingButModelSaves('June 1st 1990');
+  const r = lastToolResult();
+  assert.strictEqual(r.accepted, false);
+  assert.match(r.problem, /has not answered/);
+  assert.match(r.say_next, /date of birth/i);
+  // The real answer still lands on the next turn.
+  say('March 4th 1994');
+  assert.strictEqual(lastToolResult().accepted, true);
 });
 
 t('an unknown tool name does not throw', () => {

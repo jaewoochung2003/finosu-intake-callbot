@@ -135,6 +135,9 @@ function handleCall(twilioWs, opts = {}) {
   // The caller's last transcribed words, kept so end_call can be checked against
   // what they actually said rather than taken on the model's word.
   let lastCallerSaid = '';
+  // Has the caller produced a real turn since the last question went out? Guards
+  // save_answer against an answer the model wrote for them.
+  let callerSpokeSinceAsk = false;
   // Whether the model is generating right now. Only then is a cancel meaningful.
   let responseActive = false;
   // When the bot started its current line.
@@ -160,6 +163,8 @@ function handleCall(twilioWs, opts = {}) {
   // Ask the model to say a specific line next. Used for the greeting, for keypad
   // confirmations, and for the closing line, all of which originate on this side.
   const speak = (line, { cancelFirst = false } = {}) => {
+    // A new line to the caller opens a new turn; nothing has been said into it yet.
+    callerSpokeSinceAsk = false;
     // Cancelling when nothing is generating is an error back from the API on every
     // turn, which buries the log lines that matter under noise.
     if (cancelFirst && responseActive) toOpenai({ type: 'response.cancel' });
@@ -260,6 +265,7 @@ function handleCall(twilioWs, opts = {}) {
       case 'conversation.item.input_audio_transcription.completed': {
         if (!msg.transcript) break;
         lastCallerSaid = msg.transcript;
+        if (!isNotSpeech(msg.transcript)) callerSpokeSinceAsk = true;
         const open = intake.currentField(session);
         log(
           session.callSid,
@@ -338,7 +344,25 @@ function handleCall(twilioWs, opts = {}) {
 
     let result;
     if (name === 'save_answer') {
-      if (isNotSpeech(args.answer)) {
+      // Nobody has spoken since the question was asked, so there is no answer to file
+      // and anything in the tool call came from the model. On a live call the caller
+      // said nothing usable, the transcriber wrote "You" twice, and the model filed a
+      // date of birth of June 1st 1990 that the applicant had never said. The prompt
+      // has always told it not to invent an answer; this is the server refusing to
+      // take one. A keypad press counts as the caller answering, and so does the
+      // read-back turn, where the caller's yes may still be in flight.
+      if (!callerSpokeSinceAsk && !session.pending) {
+        log(
+          session.callSid,
+          'refused a save with no caller turn behind it:',
+          JSON.stringify(V.redact((intake.currentField(session) || {}).key, String(args.answer || '')).slice(0, 60)),
+        );
+        result = {
+          accepted: false,
+          problem: 'the caller has not answered yet',
+          say_next: intake.nextPrompt(session),
+        };
+      } else if (isNotSpeech(args.answer)) {
         // Nothing was said. Say so like a person would and ask again, rather than
         // writing silence into the form or repeating the question with no reason.
         log(session.callSid, 'ignored a save from silence:', JSON.stringify(String(args.answer || '')));

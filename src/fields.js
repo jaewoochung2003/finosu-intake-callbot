@@ -155,7 +155,13 @@ const FIELDS = [
     reask: 'That email one more time?',
     confirm: true,
     confirmLine: (v) => `So that's ${V.spellEmail(v)}.`,
-    respell: 'No problem. Spell the part before the at sign, one letter at a time.',
+    // The respell used to ask for the part before the at sign on its own, and then
+    // the validator rejected exactly that for having no domain: a caller who did what
+    // he was told heard "that did not come through as an email address" and the
+    // recovery path dead-ended. It asks for the whole address now, spelled, which is
+    // what validateEmail can actually accept.
+    respell:
+      'No problem. Spell the whole address for me, one letter at a time, and say the part after the at sign too.',
     validate: (said) => V.validateEmail(said),
   },
   {
