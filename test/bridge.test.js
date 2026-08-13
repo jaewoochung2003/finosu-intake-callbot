@@ -301,7 +301,7 @@ t('the fields nothing can check are read back and wait for a yes', () => {
   assert.match(lastToolResult().say_next, /g a b r i e l, at finosu dot com\. Is that right\?$/);
   // a no sends it back to the same question, spelled this time
   say('no');
-  assert.match(lastToolResult().say_next, /Spell the whole address/);
+  assert.match(lastToolResult().say_next, /Spell out the whole address/);
 });
 
 t('the model cannot file an answer the caller never gave', () => {
