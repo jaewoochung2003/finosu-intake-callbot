@@ -394,6 +394,11 @@ function validateText(said, opts = {}) {
     // never ends in one, and the printed form is what a person reads.
     .replace(/[.!?,;:]+$/, '')
     .trim();
+  // A caller asking a question has not answered one. "Who do you work for?" got
+  // "What?" back and wrote it in as the employer, because any two characters clear
+  // the length check. Nobody works for "What", lives in "Huh" or is in the "Sorry"
+  // department, so an utterance made only of conversation words is a re-ask.
+  if (P.isConversational(clean)) return { ok: false, error: 'I did not catch that' };
   if (clean.length < (opts.min || 2)) return { ok: false, error: 'I did not catch that' };
   if (clean.length > (opts.max || 120)) return { ok: false, error: 'that was longer than I can take' };
   return { ok: true, value: clean };
@@ -410,7 +415,12 @@ function validateYesNo(said) {
 
 function validateEnum(said, options, synonyms) {
   const picked = P.parseEnum(said, options, synonyms);
-  if (!picked) return { ok: false, error: `I need one of: ${options.join(', ')}` };
+  // The error is deliberately vague, because the field's own re-ask already names the
+  // choices in the words people use. Listing the stored values here read them out
+  // twice in one breath, the first time in the form's own vocabulary: "Sorry, I need
+  // one of: Weekly, Biweekly, Semiweekly, Monthly. Weekly, every two weeks, twice a
+  // month, or monthly?" Semiweekly is a label on a form, not a thing anyone says.
+  if (!picked) return { ok: false, error: 'I did not catch that' };
   return { ok: true, value: picked };
 }
 

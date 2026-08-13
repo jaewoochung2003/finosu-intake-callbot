@@ -433,7 +433,10 @@ const FIELDS = [
     key: 'pay_frequency_day',
     label: 'Pay Frequency Day',
     group: 'Employment',
-    ask: 'Which day of the week does that land on?',
+    // Prefaced, because this sits in the employer block but asks about pay. Straight
+    // after 'are you in a particular department?', a bare 'which day does that land
+    // on?' has no antecedent a caller can hear, and one asked what it was about.
+    ask: 'Back to your pay for a second. Which day of the week do you get paid?',
     reask: 'Which day of the week?',
     // Only a weekly or biweekly schedule has a day of the week.
     appliesWhen: (app) => app.pay_frequency === 'Weekly' || app.pay_frequency === 'Biweekly',
@@ -447,7 +450,9 @@ const FIELDS = [
     key: 'specific_day',
     label: 'Specific Day',
     group: 'Employment',
-    ask: 'Which day or days of the month is that?',
+    // Same reason as pay_frequency_day above: this follows the department question,
+    // so it names what it is asking about instead of pointing at 'that'.
+    ask: 'Back to your pay for a second. Which day or days of the month do you get paid?',
     reask: 'Which day of the month?',
     appliesWhen: (app) => app.pay_frequency === 'Semiweekly' || app.pay_frequency === 'Monthly',
     skipValue: 'N/A',
