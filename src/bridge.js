@@ -632,12 +632,30 @@ function handleCall(twilioWs, opts = {}) {
     lastActivity = Date.now();
     nudged = false;
     const field = intake.currentField(session);
-    if (!field || !field.dtmf) return; // current question is not a number
+    // Every press is logged, including the ones that go nowhere. Three separate
+    // guesses at why typing during a question misbehaved were wrong, and each was
+    // wrong because a press can be dropped on four different paths without leaving a
+    // trace. A key that vanishes now says so and says why.
+    const trace = (what) =>
+      log(
+        session.callSid,
+        `keypad ${digit === '#' || digit === '*' ? digit : '#'}: ${what}`,
+        `field=${field ? field.key : 'none'}`,
+        `buffered=${dtmfBuffer.length}`,
+        `pending=${session.pending ? session.pending.key : 'no'}`,
+        `speaking=${responseActive || queuedBytes > 0 ? 'yes' : 'no'}`,
+      );
+
+    if (!field) return trace('DROPPED, no question open');
+    if (!field.dtmf) return trace('DROPPED, this question does not take digits');
 
     // A key pressed within the deaf window belongs to the digits that were just
     // submitted, not to the next question. Without it the extra press on an
     // overtyped fixed-length field starts a buffer against the following field.
-    if (Date.now() < dtmfDeafUntil) return;
+    if (Date.now() < dtmfDeafUntil) {
+      return trace(`DROPPED, inside the ${DTMF_DEAF_MS}ms window after the last entry`);
+    }
+    trace('accepted');
 
     if (dtmfTimer) clearTimeout(dtmfTimer);
 

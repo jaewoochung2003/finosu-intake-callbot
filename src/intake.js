@@ -595,6 +595,18 @@ function undoLast(session) {
 function submitDtmf(session, digits) {
   const field = currentField(session);
   if (!field || !field.dtmf) return null;
+  // Typed digits are never an answer to "is that right?". A read-back is a yes/no
+  // question, and submit() routes anything arriving while one is open to the
+  // confirmation reader, so a caller who heard their routing number back wrong and
+  // typed the right one had those digits read as a yes, a no, or neither, and got
+  // "Sorry, was that a yes or a no?" for an answer. Typing a number at a read-back
+  // means that number, so the pending value is dropped and the digits are captured
+  // fresh, which reads the new number back in its turn.
+  if (session.pending && session.pending.key === field.key) {
+    session.pending = null;
+    delete session.record[field.key];
+    clearDerived(session, field.key);
+  }
   return submit(session, digits, { source: 'dtmf' });
 }
 
