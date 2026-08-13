@@ -336,7 +336,11 @@ const FIELDS = [
     key: 'account_number',
     label: 'Account Number',
     group: 'Bank Account',
-    ask: 'And the account number itself.',
+    // The only digit field with no fixed length, so nothing but the caller can say
+    // where it ends. Saying so is what makes the pound key useful; without it a
+    // caller typing a long number pauses, the idle timer ends the entry early, and
+    // the half they typed is a valid length for an account number.
+    ask: 'And the account number itself. If you type it, press pound when you reach the end.',
     reask: 'That account number once more?',
     dtmf: 17,
     sensitive: true,

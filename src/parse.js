@@ -11,6 +11,13 @@
 
 // ---------- word tables ----------
 
+// Own keys only. `w in MAP` walks the prototype chain, so a caller who says the
+// word "constructor" to any question backed by one of these tables matched
+// Object.prototype and got the Object constructor FUNCTION back as their answer.
+// parseWeekday returned it outright, which put a function where a day of the week
+// belonged on the application.
+const has = (map, key) => Object.prototype.hasOwnProperty.call(map, key);
+
 const ONES = {
   zero: 0, oh: 0, o: 0, nought: 0, one: 1, two: 2, three: 3, four: 4, five: 5,
   six: 6, seven: 7, eight: 8, nine: 9,
@@ -106,9 +113,9 @@ function words(text) {
 
 function wordDigits(w) {
   if (/^\d+$/.test(w)) return w;
-  if (w in ONES) return String(ONES[w]);
-  if (w in TEENS) return String(TEENS[w]);
-  if (w in TENS) return String(TENS[w]);
+  if (has(ONES, w)) return String(ONES[w]);
+  if (has(TEENS, w)) return String(TEENS[w]);
+  if (has(TENS, w)) return String(TENS[w]);
   return '';
 }
 
@@ -136,7 +143,7 @@ function spokenDigits(text) {
     }
     if (w === 'hundred' || w === 'thousand') continue;
     // "forty eight" is one pair of digits in a read-aloud number, not 40 then 8
-    if (w in TENS && list[i + 1] in ONES && ONES[list[i + 1]] !== 0) {
+    if (has(TENS, w) && has(ONES, list[i + 1]) && ONES[list[i + 1]] !== 0) {
       out += String(TENS[w] + ONES[list[++i]]);
       continue;
     }
@@ -155,9 +162,9 @@ function spokenYear(list) {
     if (/^\d+$/.test(w)) nums.push(Number(w));
     else if (w === 'thousand') nums.push(1000);
     else if (w === 'hundred') nums.push(100);
-    else if (w in TEENS) nums.push(TEENS[w]);
-    else if (w in TENS) nums.push(TENS[w] + (list[i + 1] in ONES ? ONES[list[++i]] : 0));
-    else if (w in ONES) nums.push(ONES[w]);
+    else if (has(TEENS, w)) nums.push(TEENS[w]);
+    else if (has(TENS, w)) nums.push(TENS[w] + (has(ONES, list[i + 1]) ? ONES[list[++i]] : 0));
+    else if (has(ONES, w)) nums.push(ONES[w]);
     else return null;
   }
   if (!nums.length) return null;
@@ -209,23 +216,23 @@ function parseDate(text) {
 
   for (let i = 0; i < list.length; i++) {
     const w = list[i];
-    if (month === null && w in MONTHS) { month = MONTHS[w]; continue; }
+    if (month === null && has(MONTHS, w)) { month = MONTHS[w]; continue; }
     // Unambiguous day tokens may appear before OR after the month, so a date said
     // day-first ("the third of April") is read as the 3rd, not as the 19th grabbed
     // off the year. "twenty eighth" is a tens word plus an ORDINAL, which the bare
     // "tens + ONES" test below missed, so it recorded the 8th.
     if (day === null) {
-      if (w in TENS && list[i + 1] in ORDINALS) { day = TENS[w] + ORDINALS[list[++i]]; continue; }
-      if (w in ORDINALS) { day = ORDINALS[w]; continue; }
+      if (has(TENS, w) && has(ORDINALS, list[i + 1])) { day = TENS[w] + ORDINALS[list[++i]]; continue; }
+      if (has(ORDINALS, w)) { day = ORDINALS[w]; continue; }
       if (/^\d{1,2}(st|nd|rd|th)$/.test(w)) { day = parseInt(w, 10); continue; }
     }
     // Bare cardinal day words are only read after the month, so the year's leading
     // word ("nineteen ninety") is never mistaken for the nineteenth.
     if (month !== null && day === null) {
       if (/^\d{1,2}$/.test(w) && Number(w) >= 1 && Number(w) <= 31) { day = Number(w); continue; }
-      if (w in TENS && list[i + 1] in ONES) { day = TENS[w] + ONES[list[++i]]; continue; }
-      if (w in TEENS) { day = TEENS[w]; continue; }
-      if (w in ONES) { day = ONES[w]; continue; }
+      if (has(TENS, w) && has(ONES, list[i + 1])) { day = TENS[w] + ONES[list[++i]]; continue; }
+      if (has(TEENS, w)) { day = TEENS[w]; continue; }
+      if (has(ONES, w)) { day = ONES[w]; continue; }
     }
     if (month !== null && day !== null) rest.push(w);
   }
@@ -238,7 +245,7 @@ function parseDate(text) {
     const yearTokens = [];
     let started = false;
     for (const w of rest) {
-      const isYear = /^\d+$/.test(w) || w === 'thousand' || w === 'hundred' || w in TEENS || w in TENS || w in ONES;
+      const isYear = /^\d+$/.test(w) || w === 'thousand' || w === 'hundred' || has(TEENS, w) || has(TENS, w) || has(ONES, w);
       if (isYear) { yearTokens.push(w); started = true; }
       else if (started) break;
     }
@@ -541,15 +548,15 @@ function parseAmount(text) {
 
   for (let i = 0; i < list.length; i++) {
     const w = list[i];
-    if (w in TENS) {
+    if (has(TENS, w)) {
       closeGroup();
       current = TENS[w];
-      if (list[i + 1] in ONES && ONES[list[i + 1]] > 0) current += ONES[list[++i]];
+      if (has(ONES, list[i + 1]) && ONES[list[i + 1]] > 0) current += ONES[list[++i]];
       saw = true;
       continue;
     }
-    if (w in TEENS) { closeGroup(); current = TEENS[w]; saw = true; continue; }
-    if (w in ONES) { closeGroup(); current = ONES[w]; saw = true; continue; }
+    if (has(TEENS, w)) { closeGroup(); current = TEENS[w]; saw = true; continue; }
+    if (has(ONES, w)) { closeGroup(); current = ONES[w]; saw = true; continue; }
     if (w === 'hundred') { current = (current === null ? 1 : current) * 100; scaled = true; saw = true; continue; }
     if (w === 'thousand' || w === 'grand' || w === 'k') {
       total += (current === null ? 1 : current) * 1000;
@@ -690,23 +697,23 @@ function yearWordsAt(words_, i) {
   const n1 = words_[i + 1];
   const n2 = words_[i + 2];
 
-  if (w in ONES && n1 === 'thousand') {
+  if (has(ONES, w) && n1 === 'thousand') {
     const base = ONES[w] * 1000;
-    if (n2 in ONES) return { value: base + ONES[n2], used: 3 };
-    if (n2 in TEENS) return { value: base + TEENS[n2], used: 3 };
-    if (n2 in TENS) {
+    if (has(ONES, n2)) return { value: base + ONES[n2], used: 3 };
+    if (has(TEENS, n2)) return { value: base + TEENS[n2], used: 3 };
+    if (has(TENS, n2)) {
       const n3 = words_[i + 3];
-      if (n3 in ONES) return { value: base + TENS[n2] + ONES[n3], used: 4 };
+      if (has(ONES, n3)) return { value: base + TENS[n2] + ONES[n3], used: 4 };
       return { value: base + TENS[n2], used: 3 };
     }
     return { value: base, used: 2 };
   }
 
   // nineteen ninety four -> 1994, twenty twenty five -> 2025
-  const lead = w in TEENS ? TEENS[w] : w in TENS ? TENS[w] : null;
-  if (lead !== null && lead >= 10 && n1 in TENS) {
+  const lead = has(TEENS, w) ? TEENS[w] : has(TENS, w) ? TENS[w] : null;
+  if (lead !== null && lead >= 10 && has(TENS, n1)) {
     const n3 = words_[i + 2];
-    if (n3 in ONES) return { value: lead * 100 + TENS[n1] + ONES[n3], used: 3 };
+    if (has(ONES, n3)) return { value: lead * 100 + TENS[n1] + ONES[n3], used: 3 };
     return { value: lead * 100 + TENS[n1], used: 2 };
   }
 
@@ -754,8 +761,8 @@ function parseEmail(text) {
       i += year.used - 1;
       continue;
     }
-    if (w in ONES && w !== 'o') tokens.push(String(ONES[w]));
-    else if (w in TEENS) tokens.push(String(TEENS[w]));
+    if (has(ONES, w) && w !== 'o') tokens.push(String(ONES[w]));
+    else if (has(TEENS, w)) tokens.push(String(TEENS[w]));
     else tokens.push(w);
   }
 
@@ -787,7 +794,7 @@ function parseState(text) {
 
 function parseWeekday(text) {
   for (const w of words(text)) {
-    if (w in WEEKDAYS) return WEEKDAYS[w];
+    if (has(WEEKDAYS, w)) return WEEKDAYS[w];
     // "I get paid Fridays" is the ordinary answer to "which day of the week", and the
     // plural matched nothing, so it failed three times and left Pay Frequency Day
     // blank on an otherwise complete application.
@@ -805,8 +812,8 @@ function parseDayOfMonth(text) {
     const w = list[i];
     let n = null;
     if (/^\d{1,2}(st|nd|rd|th)?$/.test(w)) n = parseInt(w, 10);
-    else if (w in ORDINALS) n = ORDINALS[w];
-    else if (w in TENS && list[i + 1] in ORDINALS) { n = TENS[w] + ORDINALS[list[++i]]; }
+    else if (has(ORDINALS, w)) n = ORDINALS[w];
+    else if (has(TENS, w) && has(ORDINALS, list[i + 1])) { n = TENS[w] + ORDINALS[list[++i]]; }
     if (n !== null && n >= 1 && n <= 31 && !days.includes(String(n))) days.push(String(n));
   }
   // "the fifteenth and the last day" keeps the spoken order; last day of the month

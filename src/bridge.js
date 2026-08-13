@@ -38,7 +38,15 @@ const CALLS_DIR = path.join(__dirname, '..', 'calls');
 
 // A keypad entry is finished by the # key, by reaching the expected digit count, or
 // by the caller stopping for this long.
-const DTMF_IDLE_MS = 2500;
+// How long a gap between key presses ends the entry. This was 2.5 seconds, which is
+// shorter than the pause a person takes reading a long number off a statement or
+// finding the next digit on a phone held away from their ear.
+//
+// The fixed-length fields survived a short window, because a truncated entry fails
+// its own length check and gets re-asked. The account number does not: it is the one
+// field where the length is a range, 4 to 17, so a partial entry validates and the
+// bot reads the half a caller typed back as though it were the whole number.
+const DTMF_IDLE_MS = 6000;
 // After a keypad entry lands, ignore anything the model tries to save for a moment;
 // it may still be transcribing the tones as speech.
 const DTMF_SUPPRESS_MS = 2500;

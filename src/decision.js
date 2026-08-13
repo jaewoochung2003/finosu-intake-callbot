@@ -19,6 +19,7 @@
 // record was filled.
 
 const V = require('./validate');
+const P = require('./parse');
 
 // The line the brief draws, in one place. Moving it re-decides every stored
 // application that carries an income figure, which is why the figure is stored.
@@ -34,6 +35,12 @@ const INCOME_THRESHOLD = 2000;
 const REQUIRED_FIELDS = [
   'name', 'email', 'birthday', 'ssn_last_four',
   'street_1', 'city', 'state', 'zip',
+  // The employer block belongs here too. A caller who cleared the five rules, gave
+  // both bank numbers and hung up on the address block came out Approved with the
+  // whole employment section blank and, worse, an empty "not captured" line, so
+  // nothing on the form said anything was missing. These two carry the placeholder
+  // "N/A" for an unemployed applicant, which is a value, so that path still approves.
+  'employer_name', 'employer_address',
 ];
 
 // Every application, approved or declined, is stamped with the rule set it faced.
@@ -95,6 +102,22 @@ const RULES = [
         ? app.monthly_income < INCOME_THRESHOLD
         : app.income_over_2000 === false,
     needs: ['income_over_2000'],
+  },
+  {
+    // The age rule lives here with the other five so a stored record decides the same
+    // way twice. It used to exist only as a mid-call check in intake.js, which meant
+    // an under-18 decline could not be replayed: decide() over the stored JSON found
+    // no rule for it and returned Incomplete with no reason, on the one outcome whose
+    // reason is least negotiable. The call still stops the moment it hears the date;
+    // this is what makes the record explain itself afterwards.
+    code: 'UNDER_18',
+    reason: 'Applicant is under eighteen.',
+    applies: (app) => {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(String(app.birthday || ''))) return false;
+      const age = P.ageOn(app.birthday);
+      return typeof age === 'number' && age >= 0 && age < 18;
+    },
+    needs: ['birthday'],
   },
   {
     code: 'DEPLOYED_MILITARY',
@@ -236,6 +259,19 @@ function decide(input, opts = {}) {
   const missingRequired = REQUIRED_FIELDS.filter(
     (k) => app[k] === undefined || app[k] === null || app[k] === '',
   );
+
+  // The form prints one Name line, joined from the two halves the call asks for, so a
+  // name with nothing to join is a half-captured name. Giving up on the first name
+  // left "Smith" standing, which is a value, so the required-field gate above passed
+  // it and a green Approved went out over a one-word name. Checking the joined value
+  // rather than the halves keeps this working on a record replayed from stored JSON,
+  // where only the joined name survives.
+  if (
+    !missingRequired.includes('name') &&
+    String(app.name || '').trim().split(/\s+/).filter(Boolean).length < 2
+  ) {
+    missingRequired.push('name');
+  }
 
   if (unevaluated.length || missingRequired.length) {
     return {

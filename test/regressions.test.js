@@ -573,6 +573,103 @@ t('regression: correcting the surname reaches the printed name', () => {
   assert.strictEqual(s.record.name, 'Gabriel Chung');
 });
 
+t('regression: a military dependent is declined, a veteran is not', () => {
+  // The question asks two things at once and callers answer the pair in one sentence.
+  // The plain yes/no reader took the leading "no" and approved the dependent.
+  for (const said of [
+    'no, but my husband is deployed',
+    'I am a dependent, my wife is deployed right now',
+    'my dad is deployed overseas',
+    'no but my spouse is active duty stationed abroad',
+  ]) {
+    assert.strictEqual(V.validateDeployed(said).value, true, `"${said}" did not decline`);
+  }
+  for (const said of ['no', 'no my wife is a teacher', 'I am a veteran', 'my husband is a veteran']) {
+    assert.strictEqual(V.validateDeployed(said).value, false, `"${said}" wrongly declined`);
+  }
+});
+
+t('regression: not knowing is not answering no', () => {
+  for (const said of ["I don't know", 'not sure', 'no idea', 'no clue', 'I would have to check']) {
+    assert.strictEqual(P.parseYesNo(said), null, `"${said}" was recorded as a no`);
+  }
+  // A hedged no is still a no.
+  for (const said of ['probably not', "I don't think so", 'not really']) {
+    assert.strictEqual(P.parseYesNo(said), false, `"${said}" stopped being a no`);
+  }
+});
+
+t('regression: an hourly or daily rate is never converted by another period word', () => {
+  // "twenty dollars an hour a week" took the weekly multiplier and applied it to the
+  // RATE, recording 87 dollars a month against someone earning about 3,500.
+  for (const said of ['twenty dollars an hour', 'twenty dollars an hour a week', 'two hundred a day']) {
+    assert.strictEqual(V.validateMonthlyIncome(said, 'Weekly').ok, false, `"${said}" produced a figure`);
+  }
+  assert.strictEqual(V.validateMonthlyIncome('fifteen hundred a fortnight', 'Monthly').value, 3250);
+  assert.strictEqual(V.validateMonthlyIncome('nine thousand a quarter', 'Monthly').value, 3000);
+});
+
+t('regression: a pay cycle of N/A does not convert a per-paycheck figure at 1x', () => {
+  // "N/A" is no cycle, not a cycle of one. Treated as one it recorded 1,200 a month
+  // for someone paid 1,200 every two weeks and declined them.
+  assert.strictEqual(V.validateMonthlyIncome('twelve hundred a paycheck', 'N/A').ok, false);
+  assert.strictEqual(V.validateMonthlyIncome('twelve hundred a paycheck', null).ok, false);
+  assert.strictEqual(V.validateMonthlyIncome('twelve hundred a paycheck', 'Biweekly').value, 2600);
+});
+
+t('regression: Approved needs a whole name and the employer block', () => {
+  const { decide } = require('../src/decision');
+  const base = {
+    name: 'Joe Smith', email: 'j@x.com', birthday: '1974-05-04', ssn_last_four: '1234',
+    street_1: '1 Main St', city: 'Vienna', state: 'VA', zip: '22182',
+    employer_name: 'Inova', employer_address: '8110 Gatehouse Rd',
+    employment_status: 'Employed', monthly_income: 5000, income_over_2000: true,
+    deployed_military: false, financial_assistance: false, account_type: 'Checking',
+    routing_number: '026009593', account_number: '981227045',
+  };
+  assert.strictEqual(decide(base).decision, 'Approved');
+  // A one-word name is a half-captured name: giving up on the first name left the
+  // surname standing and a green Approved went out over it.
+  assert.strictEqual(decide({ ...base, name: 'Smith' }).decision, 'Incomplete');
+  // Hanging up before the employer block used to approve with it blank and an empty
+  // not-captured line.
+  assert.strictEqual(decide({ ...base, employer_name: undefined }).decision, 'Incomplete');
+  assert.strictEqual(decide({ ...base, employer_address: undefined }).decision, 'Incomplete');
+  // An unemployed applicant carries "N/A" there, so that path is untouched.
+  assert.strictEqual(
+    decide({ ...base, employment_status: 'Unemployed', employer_name: 'N/A', employer_address: 'N/A', monthly_income: 0, income_over_2000: false }).decision,
+    'Declined',
+  );
+});
+
+t('regression: an under-18 decline replays from its stored record', () => {
+  const { decide } = require('../src/decision');
+  const format = require('../src/format');
+  const s = intake.startSession({ callSid: 'reg' });
+  for (const t2 of ['Joe', 'Smith', 'yes', 'joe at aol dot com', 'yes', '5 4 2015']) intake.submit(s, t2);
+  assert.strictEqual(s.outcome.decision, 'Declined');
+  assert.strictEqual(s.outcome.reasons[0].code, 'UNDER_18');
+  // The age check lived only in intake, so decide() over the stored JSON found no
+  // rule for it and turned the decline back into Incomplete with no reason.
+  const replay = decide(format.apiPayload(s));
+  assert.strictEqual(replay.decision, 'Declined');
+  assert.ok(replay.reasons.some((r) => r.code === 'UNDER_18'));
+  // An adult is untouched by the new rule.
+  assert.strictEqual(decide({ birthday: '1974-05-04' }).reasons.length, 0);
+});
+
+t('regression: a spoken Object.prototype key never becomes a value', () => {
+  // `w in MAP` walks the prototype chain, so saying "constructor" to the pay-day
+  // question returned the Object constructor FUNCTION and put it on the application.
+  for (const w of ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__']) {
+    assert.notStrictEqual(typeof P.parseWeekday(w), 'function', `parseWeekday(${w})`);
+    assert.notStrictEqual(typeof P.parseDayOfMonth(w), 'function', `parseDayOfMonth(${w})`);
+    assert.notStrictEqual(typeof P.parseAmount(w), 'function', `parseAmount(${w})`);
+  }
+  assert.strictEqual(P.parseWeekday('Friday'), 'Friday');
+  assert.strictEqual(P.parseWeekday('Fridays'), 'Friday'); // the plural was not a weekday
+});
+
 t('regression: a yes/no question that wants a value asks for the value', () => {
   // Found on a live call. "Do you want texts going to a different number?" is a
   // yes/no question, so the caller said yes, and the bot answered "I need a phone
