@@ -291,27 +291,21 @@ function spellEmail(email) {
 function validateDob(said, asOf) {
   const iso = P.parseDate(said);
   if (!iso) {
-    // A day and month with no year ("the 28th of June") parses only once a year is
-    // added, so ask for the year specifically instead of re-asking the whole date.
-    if (P.parseDate(`${said} 1990`)) {
-      // A self-contained follow-up. `reprompt` tells intake.js to say this line by
-      // itself instead of wrapping it as "Sorry, ...? One more time on the date of
-      // birth", which asked for the whole date again right after asking only the year.
+    // A partial date is refused outright rather than half-kept. Asking for the missing
+    // piece made each attempt depend on the last, and nothing carried between them: a
+    // caller who said "June 28th" was asked for the year, the year came back
+    // mis-transcribed, that was read as a year on its own, and the bot then asked for
+    // the month and day it had already been told. The whole date every time costs one
+    // extra word and has one state instead of four.
+    // Missing a year ("the 28th of June") or missing the month and day ("1974",
+    // "nineteen seventy four"). Both are a piece of a date, so both get the same
+    // answer: say the whole thing.
+    const partial = !!P.parseDate(`${said} 1990`) || !!P.parseDate(`1 1 ${said}`);
+    if (partial) {
       return {
         ok: false,
-        error: 'I have the month and day, what year were you born?',
-        reprompt: 'I have the month and day. What year were you born?',
-      };
-    }
-    // The mirror of the case above: a year on its own. A caller who answers "1974"
-    // has given a third of the answer and heard "that did not come through as a
-    // date", which is both wrong and useless, since the fix is to name the month and
-    // day rather than to say the whole thing again.
-    if (/^\s*(19|20)?\d{2}\s*$/.test(String(said)) && P.parseDate(`1 1 ${said}`)) {
-      return {
-        ok: false,
-        error: 'I have the year, what month and day were you born?',
-        reprompt: 'I have the year. What month and day?',
+        error: 'I need the whole date',
+        reprompt: 'I need the whole date. Month, day and year.',
       };
     }
     return { ok: false, error: 'that did not come through as a date' };

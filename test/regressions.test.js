@@ -1155,25 +1155,39 @@ t('regression: a confirm carries the read-back flag the bridge maps', () => {
 
 // A day and month with no year ("the 28th of June") re-asked the whole date; now it
 // asks for the year specifically.
-t('regression: a date missing only the year asks for the year', () => {
-  const r = V.validateDob('the 28th of June');
-  assert.strictEqual(r.ok, false);
-  assert.match(r.error, /year/i);
-  // a full date still validates, and true garbage still gets the generic error
-  assert.ok(V.validateDob('the 28th of June 2003').ok);
-  assert.doesNotMatch(V.validateDob('asdf qwer').error, /year/i);
+t('regression: a partial date is refused, not half-kept', () => {
+  // This used to ask for whichever piece was missing and carry the rest, which meant
+  // each attempt depended on the one before it while nothing actually carried between
+  // them. On a live call "June 28th" was answered with "what year?", the year came
+  // back mis-transcribed, that was read as a year on its own, and the bot asked for
+  // the month and day it had already been given. Three turns to lose a date the
+  // caller said correctly twice.
+  for (const said of ['the 28th of June', 'June 28th', '1974', 'nineteen seventy four']) {
+    const r = V.validateDob(said);
+    assert.strictEqual(r.ok, false, `"${said}" was accepted as a whole date`);
+    assert.match(r.reprompt, /whole date/i, `"${said}" did not ask for the whole date`);
+  }
+  // A whole date still validates, however it is said, and garbage gets the generic
+  // error rather than the partial-date one.
+  for (const said of ['the 28th of June 2003', 'June 28th 2003', '6 28 2003', '1974/5/4']) {
+    assert.ok(V.validateDob(said).ok, `"${said}" did not validate`);
+  }
+  assert.doesNotMatch(V.validateDob('asdf qwer').error, /whole date/i);
 });
 
-// The year-only re-ask used to be glued behind the generic re-ask, so the caller
-// heard "...what year were you born? One more time on the date of birth." — two
-// questions where one was asked. The reprompt is now said by itself.
-t('regression: the year re-ask is one clean question, not two', () => {
+// The partial-date re-ask used to be glued behind the generic one, so the caller heard
+// two questions where one was asked. The reprompt is still said by itself.
+t('regression: the partial-date re-ask is one clean question, not two', () => {
   const s = intake.startSession({ callSid: 'reg' });
   for (const turn of ['Jaewoo', 'Chung', 'yes', 'jaewoo at gmail dot com', 'yes'])
     intake.submit(s, turn);
   const r = intake.submit(s, 'the twenty eighth of June');
-  assert.match(r.say, /what year were you born\?$/i);
+  assert.match(r.say, /whole date/i);
   assert.doesNotMatch(r.say, /one more time|sorry/i);
+  // And the next turn stands on its own: a whole date lands whatever came before it.
+  const ok = intake.submit(s, 'the twenty eighth of June nineteen ninety');
+  assert.strictEqual(s.record.birthday, '1990-06-28');
+  assert.match(ok.note || '', /June 28th, 1990/);
 });
 
 // Asking someone who just said "unemployed" how much they earn and who they work for

@@ -167,8 +167,17 @@ const FIELDS = [
     key: 'birthday',
     label: 'Birthday',
     group: 'Applicant',
-    ask: 'And your date of birth?',
-    reask: 'One more time on the date of birth.',
+    // One complete date per turn, and the question says which order. The old version
+    // took whatever arrived and asked for the missing piece, which meant an attempt
+    // depended on the one before it and nothing carried between them: "June 28th" was
+    // answered with "what year?", the year came back mis-transcribed as "To", that was
+    // read as a year on its own, and the bot asked for the month and day it had
+    // already been given. Three turns in and it gave up on a date the caller had said
+    // correctly twice. Each attempt stands alone now, so a bad turn costs one turn.
+    ask: "And your date of birth? Give me the month, day and year, like March fourth nineteen ninety.",
+    reask: 'The whole date this time, month, day and year.',
+    // Eight digits on the keypad is the escape for a bad line: 06281990.
+    dtmf: 8,
     validate: (said) => V.validateDob(said),
   },
   {
