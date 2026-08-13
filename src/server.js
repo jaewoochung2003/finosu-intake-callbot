@@ -18,11 +18,6 @@ const { handleCall } = require('./bridge');
 const PORT = Number(process.env.PORT || 5050);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-if (!OPENAI_API_KEY) {
-  console.error('OPENAI_API_KEY is not set. Copy .env.example to .env and fill it in.');
-  process.exit(1);
-}
-
 // Twilio or SignalWire. SignalWire speaks the same markup and the same stream
 // protocol, down to the event names and the shape of every frame, so the bridge
 // cannot tell the two apart and nothing below this file changes. Two attributes
@@ -101,7 +96,18 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 // Required by a test rather than run: hand back the pieces and start nothing.
+//
+// The key check lives in here rather than at the top of the file for the same
+// reason listen() does. twiml() is a pure function of the carrier and the caller's
+// number and a test imports it directly, so exiting the process on a missing key at
+// import time took the whole test suite down on a fresh clone — before the summary
+// line, and with an exit code that read as a failing build. A key is what serving a
+// call needs, not what loading the module needs.
 if (require.main === module) {
+  if (!OPENAI_API_KEY) {
+    console.error('OPENAI_API_KEY is not set. Copy .env.example to .env and fill it in.');
+    process.exit(1);
+  }
   server.listen(PORT, () => {
     console.log(`callbot listening on :${PORT} (carrier: ${CARRIER})`);
     console.log(`  Voice webhook -> https://<your-tunnel-host>/incoming-call`);
