@@ -305,7 +305,11 @@ function handleCall(twilioWs, opts = {}) {
       case 'conversation.item.input_audio_transcription.completed': {
         if (!msg.transcript) break;
         lastCallerSaid = msg.transcript;
-        typing = false;
+        // A transcript arriving while digits are half entered is the model writing
+        // down the touch tones, not the caller changing their mind, so it must not
+        // lift the hold in the middle of an entry. With no entry open it means they
+        // spoke instead of typing, and the hold lifts.
+        if (!dtmfBuffer) typing = false;
         const open = intake.currentField(session);
         log(
           session.callSid,
@@ -376,6 +380,22 @@ function handleCall(twilioWs, opts = {}) {
 
   // ---------- tools ----------
 
+  // The model hears touch tones as audio and writes them down as words, so a caller
+  // typing while the question is still playing gets the digits filed as a spoken
+  // answer halfway through the entry. The window after a committed entry never covered
+  // the entry itself.
+  //
+  // It has to stay narrow. A caller who starts typing, gives up and says the number
+  // instead is a real case, and that answer is longer than what was typed. So only an
+  // answer that is the digits already in the buffer, and nothing more, is the tones
+  // coming back: type 0-2-1-0 and hear "zero two one zero", not "zero two one zero
+  // zero zero zero two one".
+  const echoesKeypad = (answer) => {
+    if (!dtmfBuffer) return false;
+    const spoken = P.spokenDigits(String(answer ?? ''));
+    return !!spoken && dtmfBuffer.startsWith(spoken);
+  };
+
   function onToolCall(callId, name, argsJson) {
     if (!callId || handledCalls.has(callId)) return;
     handledCalls.add(callId);
@@ -398,11 +418,18 @@ function handleCall(twilioWs, opts = {}) {
           problem: 'Sorry, I did not catch that',
           say_next: intake.nextPrompt(session),
         };
-      } else if (Date.now() < suppressSavesUntil && !session.pending) {
-        // The suppression window stops the model filing the tones it just heard as
-        // if they were speech. It must not swallow the yes that answers a read-back:
-        // the keypad entry is followed immediately by "I have 5 5 1 2..., is that
-        // right?", and the caller answers inside the window every time.
+      } else if ((echoesKeypad(args.answer) || Date.now() < suppressSavesUntil) && !session.pending) {
+        // The model hears the touch tones as audio and writes them down as words. The
+        // window after a committed entry caught that, but nothing covered the entry
+        // itself, so a caller typing a routing number while the question was still
+        // playing had the tones transcribed mid-entry and filed as the answer. That is
+        // where "473" came from on a live call: it went in as the apartment number and
+        // then as the city, while the digits it was made of were still being typed.
+        //
+        // `typing` covers the entry, the window covers the moment after it. Neither
+        // may swallow the yes that answers a read-back: the entry is followed straight
+        // away by "I have 5 5 1 2..., is that right?", and the caller answers inside
+        // the window every time, which is what the pending check is for.
         result = {
           accepted: false,
           problem: 'already captured from the keypad',
@@ -620,6 +647,7 @@ function handleCall(twilioWs, opts = {}) {
     }
     if (digit === '*') {
       dtmfBuffer = '';
+      typing = false;
       dtmfField = null;
       speak('Cleared. Go ahead and type it again.', { cancelFirst: true });
       return;

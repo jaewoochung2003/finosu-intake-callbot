@@ -304,6 +304,27 @@ t('the fields nothing can check are read back and wait for a yes', () => {
   assert.match(lastToolResult().say_next, /Spell out the whole address/);
 });
 
+t('the tones of a half-typed number are never filed as the answer', () => {
+  // The model hears touch tones as audio and writes them down as words. Only the
+  // moment after a committed entry was covered, so a caller typing while the question
+  // was still playing had the tones transcribed mid-entry and saved: on a live call
+  // "473" went in as the apartment number and then as the city, while the digits it
+  // was made of were still being typed.
+  const call = startCall();
+  walkTo(call, SCRIPTS.INDEX.routing);
+  call.press('0210');                  // mid-entry, nothing committed yet
+  call.say('zero two one zero');       // the model writing down the tones it heard
+  const r = call.lastToolResult();
+  assert.strictEqual(r.accepted, false);
+  assert.match(r.problem, /keypad/i, 'tones were filed as the answer');
+  // The rest of the number still lands and the entry is whole. A keypad commit speaks
+  // directly rather than answering a tool call, so the read-back is in what the server
+  // asked the model to say, not in a tool result.
+  call.press('00021');
+  const spoken = call.openai.ofType('response.create').map((m) => m.response.instructions).join(' ');
+  assert.match(spoken, /Is that right/i, 'the completed keypad entry was not read back');
+});
+
 t('the mic opens on the tail of the line, not after its last byte', () => {
   // People answer on the last syllable. A mic that waited for the final mark clipped
   // the front of the reply or lost it, and the caller repeated themselves into a bot
