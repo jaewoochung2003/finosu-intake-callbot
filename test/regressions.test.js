@@ -569,6 +569,33 @@ t('regression: correcting the surname reaches the printed name', () => {
   assert.strictEqual(s.record.name, 'Gabriel Chung');
 });
 
+t('regression: a yes/no question that wants a value asks for the value', () => {
+  // Found on a live call. "Do you want texts going to a different number?" is a
+  // yes/no question, so the caller said yes, and the bot answered "I need a phone
+  // number, ten digits" against a question that had never asked for one. On the free
+  // text fields the same answer validated instead, so "yes" was stored as the
+  // apartment number.
+  assert.deepStrictEqual(V.bareYesNeedsValue('yes', 'ask'), { ok: false, reprompt: 'ask' });
+  assert.deepStrictEqual(V.bareYesNeedsValue('yeah', 'ask'), { ok: false, reprompt: 'ask' });
+  // An answer that carries the value goes to the real validator untouched.
+  assert.strictEqual(V.bareYesNeedsValue('yes, 240 278 6143', 'ask'), null);
+  assert.strictEqual(V.bareYesNeedsValue('apartment 3B', 'ask'), null);
+  assert.strictEqual(V.bareYesNeedsValue('no', 'ask'), null);
+
+  const s = intake.startSession({ callSid: 'reg' });
+  intake.submit(s, 'Joey');
+  intake.submit(s, 'Mama');
+  intake.submit(s, 'yes');
+  intake.submit(s, 'joey at aol dot com');
+  intake.submit(s, 'yes');
+  intake.submit(s, '4 20 1967');
+  const r = intake.submit(s, 'yes'); // the SMS question
+  assert.match(r.say, /number/i);
+  assert.doesNotMatch(r.say, /ten|digits/i, 'the caller was told off for a question never asked');
+  intake.submit(s, '240 278 6143');
+  assert.strictEqual(s.record.sms_number, '(240) 278-6143');
+});
+
 t('a read-back answer that is not a yes never becomes the name', () => {
   for (const said of ["that's right", 'uh huh', 'bingo', 'aye', 'right on', 'say that again', 'Joe']) {
     const s = intake.startSession({ callSid: 'reg' });

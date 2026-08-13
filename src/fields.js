@@ -159,7 +159,8 @@ const FIELDS = [
     skipOn: P.saysNone,
     skipValue: 'Same as calling number',
     dtmf: 10,
-    validate: (said) => V.validatePhone(said),
+    validate: (said) =>
+      V.bareYesNeedsValue(said, "Sure. What's the number for texts?") || V.validatePhone(said),
   },
 
   // --- the five knockouts ---------------------------------------------------
@@ -345,7 +346,9 @@ const FIELDS = [
     optional: true,
     skipOn: (said) => P.saysNone(said, { maxWords: 3 }),
     skipValue: '',
-    validate: (said) => V.validateText(said, { min: 1 }),
+    validate: (said) =>
+      V.bareYesNeedsValue(said, "What's the apartment or unit number?") ||
+      V.validateText(said, { min: 1 }),
   },
   {
     key: 'city',
@@ -394,7 +397,8 @@ const FIELDS = [
     // to the yes/no parser, and without the word cap it gets thrown away.
     skipOn: (said) => P.saysNone(said, { maxWords: 3 }),
     skipValue: 'None',
-    validate: (said) => V.validateText(said, { min: 2, max: 60 }),
+    validate: (said) =>
+      V.bareYesNeedsValue(said, 'Which department?') || V.validateText(said, { min: 2, max: 60 }),
   },
   {
     key: 'pay_frequency_day',
@@ -447,7 +451,8 @@ const FIELDS = [
     optional: true,
     skipOn: (said) => P.saysNone(said, { maxWords: 8 }),
     skipValue: 'None',
-    validate: (said) => V.validatePhone(said),
+    validate: (said) =>
+      V.bareYesNeedsValue(said, "What's the number there?") || V.validatePhone(said),
   },
 ];
 

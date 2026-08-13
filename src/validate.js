@@ -174,6 +174,23 @@ function validateNamePart(said, which) {
   return { ok: true, value: name };
 }
 
+// Some questions are shaped as yes/no but the field wants a value: "Do you want texts
+// going to a different number?", "Any apartment or unit number?", "Are you in a
+// particular department?". A caller who answers the question as asked says "yes", and
+// the answer to the question is not the answer to the field.
+//
+// That went two ways, both wrong. On the phone number it failed validation, so the
+// caller heard "I need a phone number, ten digits" against a question that had never
+// asked for one, and repeating the question did not tell them what to do. On the free
+// text fields it validated, so "yes" was written in as the apartment number.
+//
+// A bare affirmative now asks for the value. Bare is the point: "yes, 240 278 6143"
+// carries the number and goes to the real validator untouched.
+function bareYesNeedsValue(said, ask) {
+  if (P.parseYesNo(said) !== true || !P.isConversational(said)) return null;
+  return { ok: false, reprompt: ask };
+}
+
 function validateName(said) {
   const name = P.parseName(said);
   if (!name) return { ok: false, error: 'I did not catch a name' };
@@ -455,6 +472,7 @@ module.exports = {
   validateRouting,
   validateAccount,
   validateName,
+  bareYesNeedsValue,
   validateNamePart,
   spellWords,
   spellEmail,

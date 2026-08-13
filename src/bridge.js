@@ -115,6 +115,11 @@ function handleCall(twilioWs, opts = {}) {
   let streamSid = null;
   let finished = false;
   let dtmfBuffer = '';
+  // Audio frames forwarded for the line currently being spoken, reset when the line's
+  // transcript lands. Distinguishes a line the bot said from a line the caller heard.
+  let framesThisLine = 0;
+  let bytesThisLine = 0;
+  let droppedThisLine = 0;
   let dtmfField = null;
   let dtmfTimer = null;
   let suppressSavesUntil = 0;
@@ -205,6 +210,12 @@ function handleCall(twilioWs, opts = {}) {
           toTwilio({ event: 'media', streamSid, media: { payload: msg.delta } });
           toTwilio({ event: 'mark', streamSid, mark: { name: 'chunk' } });
           markQueue.push('chunk');
+          framesThisLine += 1;
+          bytesThisLine += msg.delta.length;
+        } else if (msg.delta && !streamSid) {
+          // Audio generated before the carrier opened the stream, or after it closed,
+          // goes nowhere. The caller hears silence while the log shows the bot spoke.
+          droppedThisLine += 1;
         }
         break;
 
@@ -267,7 +278,18 @@ function handleCall(twilioWs, opts = {}) {
         if (msg.transcript) {
           const open = session.pending ? session.pending.key : (intake.currentField(session) || {}).key;
           const spoken = V.redact(open, msg.transcript);
-          log(session.callSid, 'bot:', spoken.slice(0, 160));
+          // The frame count is here because a line can be generated and never reach
+          // the caller, and the transcript alone cannot tell the two apart: a caller
+          // reported not hearing "Are you still there?" on a call where the log showed
+          // the bot saying it. Frames are what actually went down the wire, so a line
+          // logged with 0 frames is a line nobody heard.
+          const carried = framesThisLine > 0
+            ? `[${framesThisLine} frames]`
+            : `[NO AUDIO SENT${droppedThisLine ? `, ${droppedThisLine} deltas dropped, no stream` : ''}]`;
+          log(session.callSid, 'bot:', spoken.slice(0, 160), carried);
+          framesThisLine = 0;
+          bytesThisLine = 0;
+          droppedThisLine = 0;
         }
         break;
 
