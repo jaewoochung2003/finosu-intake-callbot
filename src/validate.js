@@ -243,22 +243,20 @@ function validateName(said) {
 
 // "021000021" -> "0 2 1 0 0 0 0 2 1". A run of digits said as a number is unusable
 // as a check; said one at a time it is exactly the form the caller is reading.
-// The separator between spelled-out characters, and it is three dots rather than a
-// space on purpose.
+// The separator between spelled-out characters. A space, and nothing cleverer.
 //
-// A read-back exists so the caller can check a value one character at a time against
-// something in their hand, and separated by spaces the whole run comes out as one
-// word however slowly it is said. Slowing the line down does not fix that: it makes
-// the letters longer, not further apart, which is a drawl rather than a spelling.
+// It was three dots for a while, as a way of forcing a reader with no sense of what
+// it was reading to pause between the letters. It did lengthen the line, and on a
+// telephone it was worse than what it replaced: punctuation a speech engine does not
+// interpret is punctuation it may say out loud, and there is no version of a
+// read-back that survives the bot reading the pauses aloud.
 //
-// The speech endpoint takes no instruction about pauses, so the pause has to be in
-// the text. Of the things that could be there, only this one does anything —
-// measured on "That's j o e m a m a": commas 2.04s, full stops 1.98s, spaces 2.00s,
-// three dots 2.94s. Everything else is punctuation the reader skips.
-const SPELL_GAP = '... ';
+// The pause belongs to the engine, not to the text. voice.js sends a read-back to the
+// one engine that takes an instruction and tells it what the line is for, which is
+// how the version before this one spelled well: it understood it was spelling.
 
 function spellDigits(text) {
-  return String(text).split('').join(SPELL_GAP);
+  return String(text).split('').join(' ');
 }
 
 // "Jaewoo Chung" and "Jae Woo Chung" -> "j a e w o o c h u n g".
@@ -274,7 +272,7 @@ function spellWords(text) {
     .toLowerCase()
     .replace(/[^a-z0-9]/g, '')
     .split('')
-    .join(SPELL_GAP);
+    .join(' ');
 }
 
 function validateEmail(said) {
@@ -298,7 +296,7 @@ function spellEmail(email) {
   const spelled = local
     .split('')
     .map((c) => (c === '.' ? 'dot' : c === '_' ? 'underscore' : c === '-' ? 'dash' : c))
-    .join(SPELL_GAP);
+    .join(' ');
   return `${spelled}, at ${String(domain || '').replace(/\./g, ' dot ')}`;
 }
 

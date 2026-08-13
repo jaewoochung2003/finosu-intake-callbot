@@ -455,16 +455,34 @@ t('an option named in the plural is that option', () => {
   assert.strictEqual(P.parseEnum('not a student', JOBS, {}), null);
 });
 
-// A read-back exists so the caller can check a value one character at a time. Slowing
-// the line down does not make that possible: it makes each letter longer, not the gaps
-// between them wider, which is a drawl rather than a spelling. The pause has to be in
-// the text, and only one thing put it there — measured on "That's j o e m a m a" at
-// the same speed: commas 2.04s, full stops 1.98s, spaces 2.00s, three dots 2.94s.
-t('spelled-out characters carry a gap the reader will actually pause on', () => {
+// The two kinds of line go to different speech engines, and this is the reason the
+// spelling was a blur for so long.
+//
+// tts-1 is a reader: it says the text, quickly, and takes no instruction about how.
+// Right for a question, wrong for a read-back, and turning its speed down does not
+// help — speed stretches a letter, it does not push letters apart, so what came out
+// was a drawl with the characters still run together. gpt-4o-mini-tts takes an
+// instruction and can be told what the line is for. Told to spell, the same line
+// takes 9.15 seconds against tts-1's 4.96, and the extra four seconds are the pauses.
+//
+// Putting the pauses in the text as ellipses was tried in between and is worse than
+// either: punctuation an engine does not interpret is punctuation it may read out.
+t('a read-back goes to the engine that can be told it is a read-back', () => {
   const V = require('../src/validate');
-  assert.strictEqual(V.spellWords('Joe'), 'j... o... e');
-  assert.strictEqual(V.spellDigits('021'), '0... 2... 1');
-  assert.match(V.spellEmail('zoey@gmail.com'), /^z\.\.\. o\.\.\. e\.\.\. y, at gmail dot com$/);
+  assert.strictEqual(voice.modelFor(`Okay, ${V.spellDigits('021000021')}. Is that right?`), 'gpt-4o-mini-tts');
+  assert.strictEqual(voice.modelFor(`That's ${V.spellWords('Joe Mama')}.`), 'gpt-4o-mini-tts');
+  assert.strictEqual(voice.modelFor('And the city?'), 'tts-1');
+  assert.strictEqual(voice.modelFor('Got it, Vienna. And the state?'), 'tts-1');
+  // And that engine is told what to do with it.
+  assert.match(voice.styleFor(`That's ${V.spellWords('Joe')}.`), /each single letter or digit/i);
+});
+
+// Nothing in a spoken line may be punctuation the caller could hear as a word.
+t('spelled-out characters are separated by a space and nothing else', () => {
+  const V = require('../src/validate');
+  assert.strictEqual(V.spellWords('Joe'), 'j o e');
+  assert.strictEqual(V.spellDigits('021'), '0 2 1');
+  assert.strictEqual(V.spellEmail('zoey@gmail.com'), 'z o e y, at gmail dot com');
 });
 
 // And the line still has to be recognised as a read-back afterwards. It was not: the

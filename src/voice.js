@@ -23,36 +23,39 @@
 // conversions happen here.
 
 const SPEECH_URL = 'https://api.openai.com/v1/audio/speech';
-// tts-1, not gpt-4o-mini-tts.
+// Two engines, because the two kinds of line need different things from one.
 //
-// The newer model speaks slowly. Not "carefully" — slowly: "And the city?" takes it
-// 1.45 seconds, where tts-1 says the same three words in 0.78 and a person says them
-// in less. Over a form with two dozen questions that is most of a minute of the
-// caller waiting through sentences, and it is what "a bit slow and stuttering" was.
-// Its `speed` control does not fix it either; asking for 1.15 came back LONGER than
-// default, so the number is not being applied in any dependable way.
+// tts-1 is a reader. Hand it text and it says the text, quickly and obediently, and
+// it takes no instruction about how. That is right for a question.
 //
-// What is given up is the `instructions` field, which tts-1 does not take, so the
-// pacing hint for a spelled-out read-back is gone. That turned out to cost nothing:
-// single characters separated by spaces are read one at a time regardless.
-// TTS_MODEL=gpt-4o-mini-tts puts it back with its style instructions attached.
-const TTS_MODEL = process.env.TTS_MODEL || 'tts-1';
+// It is wrong for a read-back, and this is the thing that took longest to see. The
+// version before this one had the conversational model doing the speaking, and it
+// spelled beautifully — because it understood that it was spelling. tts-1 does not
+// understand anything. Given "j... o... e" it reads three characters as fast as it
+// reads any others, and no amount of turning the speed down separates them: speed
+// stretches a letter, it does not push letters apart. What came out was a drawl with
+// the letters still run together.
+//
+// gpt-4o-mini-tts takes an instruction, so it can be told what the line is for. Told
+// to spell, the same line takes 9.15 seconds against tts-1's 4.96, and the extra four
+// seconds are pauses between the characters rather than longer characters. Its
+// drawback is that it is slow at everything, which is why it is not used for the
+// questions.
+const TTS_MODEL_PLAIN = process.env.TTS_MODEL || 'tts-1';
+const TTS_MODEL_SPELLED = process.env.TTS_MODEL_SPELLED || 'gpt-4o-mini-tts';
 const TTS_VOICE = process.env.TTS_VOICE || 'alloy';
-// Pace, and there are two of them, because the two kinds of line want opposite
-// things. An ordinary question is a sentence and wants to be over with; a read-back
-// is a string of single characters the caller is checking one at a time against
-// something in their hand, and at conversational pace it goes past faster than they
-// can follow. One number for both made the greeting drag and the spelling a blur.
+// Pace, for the engine that takes a number rather than an instruction.
 //
-// Measure on a long line, not a short one. Short samples are dominated by how much
-// generation varies between requests: 0.9, 1.0 and 1.05 all came back within 40 ms of
-// each other on a three word question, which reads as "speed does nothing", while the
-// same three values on the greeting came back 12.1, 10.7 and 9.6 seconds.
+// Measure a change on a long line, not a short one. Short samples are dominated by
+// how much generation varies between requests: 0.9, 1.0 and 1.05 all came back within
+// 40 ms of each other on a three word question, which reads as "speed does nothing",
+// while the same three values on the greeting came back 12.1, 10.7 and 9.6 seconds.
 const TTS_SPEED_PLAIN = Number(process.env.TTS_SPEED_PLAIN || process.env.TTS_SPEED || 0.9);
 const TTS_SPEED_SPELLED = Number(process.env.TTS_SPEED_SPELLED || 0.7);
 const speedFor = (text) => (SPELLED_OUT.test(text) ? TTS_SPEED_SPELLED : TTS_SPEED_PLAIN);
+const modelFor = (text) => (SPELLED_OUT.test(text) ? TTS_MODEL_SPELLED : TTS_MODEL_PLAIN);
 // Which models take a free-text delivery note. The older ones reject the field.
-const TAKES_INSTRUCTIONS = /^gpt-/.test(TTS_MODEL);
+const takesInstructions = (model) => /^gpt-/.test(model);
 
 // How the line should sound. The speech endpoint takes this as a separate field, so
 // it shapes delivery without being able to change a word — which is the entire point
@@ -70,13 +73,14 @@ const TTS_STYLE_PLAIN =
   'Calm and clear, at a normal speaking pace, like a person taking down a form over ' +
     'the phone. Do not slow down and do not leave gaps between words.';
 
-// For a line that spells something out, which is the one place the gaps earn their
-// cost: a caller checking a routing number digit by digit cannot follow it at speed.
+// For a line that spells something out. This is the instruction the whole two-engine
+// split exists to be able to send.
 const TTS_STYLE_SPELLED =
   process.env.TTS_STYLE_SPELLED ||
-  'Calm and clear, like a person taking down a form over the phone. Read the run of ' +
-    'single digits or letters one at a time with a small gap between them. Speak the ' +
-    'rest of the line at a normal pace.';
+  'You are spelling something out to somebody writing it down. Say each single ' +
+    'letter or digit on its own, slowly, with a clear pause after each one. Do not ' +
+    'run them together and do not read them as a word. Speak the rest of the ' +
+    'sentence at a normal pace.';
 
 // A read-back spells its value out as single characters with a gap between each, a
 // shape no ordinary sentence has. Three in a row is enough to recognise it and not
@@ -206,11 +210,14 @@ function request(text, { apiKey = process.env.OPENAI_API_KEY, signal } = {}) {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: TTS_MODEL,
+      model: modelFor(text),
       voice: TTS_VOICE,
       input: text,
-      ...(TAKES_INSTRUCTIONS ? { instructions: styleFor(text) } : {}),
-      ...(TAKES_INSTRUCTIONS ? {} : { speed: speedFor(text) }),
+      // One or the other: the engine that takes an instruction is told what the line
+      // is for, and the one that does not is given a number.
+      ...(takesInstructions(modelFor(text))
+        ? { instructions: styleFor(text) }
+        : { speed: speedFor(text) }),
       // Raw samples. Every other format the endpoint offers is a container that would
       // have to be decoded here first.
       response_format: 'pcm',
@@ -278,6 +285,7 @@ module.exports = {
   makeResampler,
   styleFor,
   speedFor,
+  modelFor,
   TTS_STYLE_PLAIN,
   TTS_STYLE_SPELLED,
   TTS_SPEED_PLAIN,
