@@ -406,6 +406,23 @@ t('only the line the server asked for is played to the caller', () => {
     JSON.stringify({ type: 'response.output_audio.delta', response_id: 'resp_theirs', delta: 'BBBB' }),
   );
   assert.strictEqual(twilio.ofEvent('media').length, 1, 'unprompted model audio reached the caller');
+
+  // And once our line has finished, so its id is no longer being tracked. This is the
+  // gap the model's own response used to arrive in, and where the caller heard "I'm
+  // ready for the next step" out of nowhere.
+  openai.emit(
+    'message',
+    JSON.stringify({ type: 'response.done', response: { id: 'resp_ours', output: [] } }),
+  );
+  openai.emit(
+    'message',
+    JSON.stringify({ type: 'response.output_audio.delta', response_id: 'resp_later', delta: 'CCCC' }),
+  );
+  assert.strictEqual(
+    twilio.ofEvent('media').length,
+    1,
+    'unprompted audio played in the gap between two server lines',
+  );
 });
 
 t('an unknown tool name does not throw', () => {

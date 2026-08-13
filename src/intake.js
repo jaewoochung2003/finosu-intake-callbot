@@ -204,9 +204,12 @@ function submit(session, said, opts = {}) {
 
     return {
       accepted: false,
-      problem: result.error,
       // A validator can hand back a complete follow-up question in `reprompt` (the
-      // year-only date does). Say that alone; do not glue the generic re-ask after it.
+      // partial date does). Say that alone, and report no separate problem with it:
+      // the reprompt already opens with the same words, and bridge.js builds the
+      // spoken line as problem plus say_next, so a caller heard "I need the whole
+      // date. I need the whole date. Month, day and year."
+      problem: result.reprompt ? null : result.error,
       say: result.reprompt
         ? result.reprompt
         : `${result.error === undefined ? '' : `Sorry, ${result.error}. `}${field.reask || field.ask}`,

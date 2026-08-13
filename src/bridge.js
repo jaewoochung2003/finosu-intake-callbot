@@ -283,7 +283,16 @@ function handleCall(twilioWs, opts = {}) {
         // Only audio from a response the server asked for reaches the caller. An event
         // carrying no response_id is passed through, so the fake sockets in the tests
         // still drive this path.
-        if (msg.response_id && instructed.size && !instructed.has(msg.response_id)) {
+        // The `instructed.size` guard that used to be here was a hole the width of the
+        // whole problem. A response id is dropped from the set when that response
+        // finishes, so between one line ending and the next being asked for the set is
+        // empty, the guard passed everything through, and the response server VAD
+        // creates on its own — the one where the model says whatever it likes — landed
+        // squarely in that gap. That is the "I'm ready for the next step" a caller
+        // hears out of nowhere. An event carrying a response id is played only if the
+        // server asked for that response; one carrying no id at all still passes, which
+        // is what the fake sockets in the tests send.
+        if (msg.response_id && !instructed.has(msg.response_id)) {
           uninstructedFrames += 1;
           break;
         }
@@ -571,9 +580,13 @@ function handleCall(twilioWs, opts = {}) {
     // that point the model asked question N+1 and the server filed the reply under
     // question N, and every answer after it landed in the wrong field. Handing over
     // the exact words keeps the two in step, whatever the model thinks happened.
+    // A full stop only where there is not one already. The note is a written sentence
+    // and ends in its own, so adding one produced "Got it, March 4th, 1990.." on every
+    // date.
+    const endStopped = (s) => (/[.!?]$/.test(String(s).trim()) ? String(s).trim() : `${String(s).trim()}.`);
     const line = [
-      result.problem ? `${result.problem}.` : null,
-      result.note ? `${result.note}.` : null,
+      result.problem ? endStopped(result.problem) : null,
+      result.note ? endStopped(result.note) : null,
       result.say_next,
     ]
       .filter(Boolean)
