@@ -373,11 +373,20 @@ const FIELDS = [
     group: 'Applicant',
     ask: 'Type the last four digits of your social security number on your keypad.',
     reask: 'Type those four digits on the keypad.',
-    askSpoken: 'What are the last four digits of your social security number? Say them one digit at a time.',
-    reaskSpoken: 'Those four digits again, one at a time.',
+    askSpoken: 'What are the last four digits of your social security number?',
+    reaskSpoken: 'The last four digits again.',
     keypadOnly: true,
     dtmf: 4,
     sensitive: true,
+    // Read back like the two bank numbers are.
+    //
+    // It was the one number on the call that went onto the form with nothing said
+    // about it: four digits heard down a phone line, no check digit, no directory,
+    // and the caller had no idea what had been written down. Four digits is also the
+    // shortest read-back on the call, so it costs almost nothing.
+    confirm: true,
+    confirmLine: (v) => `Okay, ${V.spellDigits(v)}.`,
+    respell: 'Let me take those four digits again.',
     validate: (said) => V.validateSsn4(said),
   },
   {
@@ -386,8 +395,8 @@ const FIELDS = [
     group: 'Bank Account',
     ask: 'Type the nine digit routing number on your keypad.',
     reask: 'Type the nine digits again.',
-    askSpoken: "What's your nine digit routing number? Say it one digit at a time.",
-    reaskSpoken: 'The nine digits again, one at a time.',
+    askSpoken: "What's your nine digit routing number?",
+    reaskSpoken: 'The nine digits again.',
     keypadOnly: true,
     dtmf: 9,
     sensitive: true,
@@ -411,8 +420,8 @@ const FIELDS = [
     // the half they typed is a valid length for an account number.
     ask: 'Type the account number on your keypad, then press pound.',
     reask: 'Type the account number again, then press pound.',
-    askSpoken: "What's your account number? Say it one digit at a time.",
-    reaskSpoken: 'The account number again, one digit at a time.',
+    askSpoken: "What's your account number?",
+    reaskSpoken: 'The account number again.',
     keypadOnly: true,
     dtmf: 17,
     sensitive: true,

@@ -50,8 +50,15 @@ const CALLS_DIR = path.join(__dirname, '..', 'calls');
 // A quiet line. The first is a nudge, the second ends the call.
 const QUIET_NUDGE_MS = 20000;
 const QUIET_END_MS = 50000;
-// How much sound goes in one message to the carrier. 20 batched frames is 400 ms.
+// How much sound goes in one message to the carrier. 20 frames is 400 ms.
+//
+// The first batch of a line is smaller. Waiting to fill 400 ms before sending
+// anything put that 400 ms on top of the second already spent generating the audio,
+// and the whole of it lands in the pause before the bot starts talking, which is the
+// part of the delay a caller actually notices. 100 ms is enough of a head start for
+// the carrier, and by the time it has played that the rest is well ahead of it.
 const FRAMES_PER_BATCH = 20;
+const FIRST_BATCH_FRAMES = 5;
 
 // Base64 decodes and re-encodes to join frames, because two base64 strings cannot be
 // concatenated as text unless each one happens to be a whole number of 3-byte groups.
@@ -236,7 +243,7 @@ function handleCall(twilioWs, opts = {}) {
       for await (const payload of stream) {
         if (finished || !streamSid) break;
         batch.push(payload);
-        if (batch.length >= FRAMES_PER_BATCH) flush();
+        if (batch.length >= (frames === 0 ? FIRST_BATCH_FRAMES : FRAMES_PER_BATCH)) flush();
       }
       flush();
       log(

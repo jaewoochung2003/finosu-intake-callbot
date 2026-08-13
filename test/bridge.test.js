@@ -527,6 +527,7 @@ tKeypad('an extra digit on a full field does not start a buffer on the next one'
   walkTo(call, SCRIPTS.INDEX.ssn);
   call.press('48215'); // one too many for a four digit field
   await sleep(400); // past the keypad deaf window, which is shorter than a question
+  call.say('yes'); // the social has its own read-back now
   // The routing number question is next and must not be holding a stray "5".
   call.press('021000021');
   const said = call.openai
@@ -899,6 +900,8 @@ tKeypad('a clean keypad run reaches the end of the bank block', () => {
   walkTo(call, SCRIPTS.INDEX.ssn);
   call.press('4821');
   call.say('four eight two one');           // the model writing down the tones
+  lineIsSpoken();                           // the social's read-back reaches the caller
+  call.say('yes');
   lineIsSpoken();                           // "type the routing number" reaches the caller
   call.press('021000021');
   call.say('zero two one zero zero zero zero two one');
