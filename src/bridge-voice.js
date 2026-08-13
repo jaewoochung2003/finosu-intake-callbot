@@ -71,6 +71,7 @@ const joinFrames = (frames) =>
 const MAX_SPEAK_MS = 30000;
 const CLOSE_MAX_MS = 15000;
 
+
 // What speech recognition writes when it is handed silence or line hiss. Whisper
 // produces these with no audible speech anywhere in the audio, and one of them was
 // once filed as an applicant's surname.
@@ -123,21 +124,29 @@ function earSession(model) {
             threshold: 0.6,
             prefix_padding_ms: 300,
             // How long the caller has to stop for before the turn is called over.
-            // It is the first of the three waits between them finishing a sentence
-            // and hearing the next one, and the only one that is a setting rather
-            // than someone else's round trip, so it is where a quarter of a second
-            // comes from.
             //
-            // It was 900, on the reasoning that somebody reading a nine digit routing
-            // number out loud pauses between the groups. They do, and at 650 a slow
-            // reader gets cut off part way — but digits spoken across several turns
-            // are added up against the length the field expects, so a chopped number
-            // finishes on the next turn instead of failing.
-            silence_duration_ms: Number(process.env.VAD_SILENCE_MS || 650),
+            // Back at 900 after a spell at 650. The quarter second was real and so was
+            // the cost: at 650 one word came back as two turns, and a transcriber
+            // handed a third of a second of audio has almost nothing to decide a
+            // language on. "Mama" came back once in Cyrillic and once in Latin on the
+            // same word, and a "yes" to a read-back came back as the Turkish "o
+            // yüzden" and was refused. Two transcripts for one utterance is also two
+            // answers for one question, with the second landing in the next field.
+            //
+            // The wait it was buying was not the expensive half anyway: measured on a
+            // live call, the detector and transcriber together took 0.6 to 1.9
+            // seconds and the speech endpoint 0.8 to 1.9.
+            silence_duration_ms: Number(process.env.VAD_SILENCE_MS || 900),
             create_response: false,
             interrupt_response: false,
           },
-          transcription: { model: 'whisper-1' },
+          // English, stated rather than guessed.
+          //
+          // Left to detect, the transcriber decides per segment, and on a short one it
+          // decides badly: a caller saying his own surname got it back in Cyrillic,
+          // and a one word "yes" came back as Turkish and was refused as an answer.
+          // Nothing on this call is in another language, so there is nothing to detect.
+          transcription: { model: 'whisper-1', language: process.env.ASR_LANGUAGE || 'en' },
         },
       },
       tools: [],
@@ -171,6 +180,10 @@ function handleCall(twilioWs, opts = {}) {
   // For the wait breakdown in the log.
   let stoppedTalkingAt = 0;
   let transcriptAt = 0;
+  // Whether a caller turn has already been taken since the bot last started a line.
+  // A second one before the bot has spoken is the same utterance arriving in pieces.
+  let heardSinceLine = false;
+  let lastAnsweredField = '';
   // One line at a time, in the order they were written. Speaking is asynchronous —
   // the audio is fetched while the call runs — so without a queue a line written
   // during another line's fetch would race it onto the wire.
@@ -244,6 +257,9 @@ function handleCall(twilioWs, opts = {}) {
       let batch = [];
       const flush = () => {
         if (!batch.length) return;
+        // The bot has started talking, so the next thing the caller says answers this
+        // rather than continuing the last thing they said.
+        heardSinceLine = false;
         toTwilio({ event: 'media', streamSid, media: { payload: joinFrames(batch) } });
         toTwilio({ event: 'mark', streamSid, mark: { name: `line-${n}-${frames}` } });
         unplayedBatches += 1;
@@ -358,6 +374,34 @@ function handleCall(twilioWs, opts = {}) {
           log(session.callSid, 'ignored line noise:', JSON.stringify(said.slice(0, 40)));
           break;
         }
+        // One utterance, two transcripts.
+        //
+        // The voice detector can call a turn over inside a word and open another, and
+        // the caller said one thing while the server gets handed two. The second lands
+        // against the NEXT question, because by then the form has moved: on an earlier
+        // call an apartment number given once went in as the apartment number and then
+        // as the city, and the application went out with a city called 473.
+        //
+        // What separates the two cases is whether the bot has said anything in
+        // between, not what the words are or how fast they came. A caller repeating
+        // themselves on purpose is answering a question they have just been asked;
+        // two halves of one utterance arrive with nothing spoken between them.
+        //
+        // Matching on the words instead was wrong in both directions. "No" answers two
+        // knockout questions in a row and both are real, so identical words are not
+        // proof of anything — and the split that caused this returned "Mama" once in
+        // Cyrillic and once in Latin, which are not identical words at all.
+        const openNow = (intake.currentField(session) || {}).key || '';
+        if (heardSinceLine && openNow !== lastAnsweredField) {
+          log(
+            session.callSid,
+            'ignored a second transcript from the same turn:',
+            JSON.stringify(said.slice(0, 40)),
+          );
+          break;
+        }
+        heardSinceLine = true;
+        lastAnsweredField = openNow;
         turn(said);
         break;
       }

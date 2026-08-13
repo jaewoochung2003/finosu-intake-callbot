@@ -62,9 +62,13 @@ function startCall({ callsDir, quietNudgeMs, quietEndMs, goodbyeMs } = {}) {
     callsDir: callsDir || fs.mkdtempSync(path.join(os.tmpdir(), 'callbot-voice-')),
     speak: (text) => {
       spoken.push(text);
-      // Enough frames that the microphone gate has something to close on: it opens
-      // on the last 150 ms of a line, so a one-frame line would never shut it.
+      // Enough frames that the microphone gate has something to close on, and a tick
+      // of delay before the first one, because the speech endpoint takes about a
+      // second to answer and several guards depend on a caller turn being able to
+      // arrive before the bot's audio starts. A generator that yields instantly is
+      // not a stand-in for that; it is the one ordering a real call never has.
       return (async function* () {
+        await new Promise((r) => setTimeout(r, 1));
         for (let i = 0; i < 20; i++) yield Buffer.alloc(160, 0xff).toString('base64');
       })();
     },
@@ -366,4 +370,43 @@ t('a spelled-out line is spoken slower than a plain one', () => {
   );
   assert.strictEqual(voice.speedFor('Okay, 0 2 1 0 0 0 0 2 1. Is that right?'), voice.TTS_SPEED_SPELLED);
   assert.strictEqual(voice.speedFor('Got it, 473. And the city?'), voice.TTS_SPEED_PLAIN);
+});
+
+// One utterance, two transcripts. The voice detector can call a turn over inside a
+// word and open another, and the second half lands against the NEXT question because
+// the form has moved by then. On a live call an apartment number given once went in
+// as the apartment number and then as the city.
+t('a second transcript before the bot has spoken is not a second answer', async () => {
+  const call = startCall();
+  await sleep(10);
+  call.say('Joe');
+  // The tail of the same word, arriving while the reply is still being fetched. No
+  // wait between the two: that is the whole of the case.
+  call.say('Joe');
+  await sleep(20);
+  assert.strictEqual(call.spoken.length, 2, `spoke: ${JSON.stringify(call.spoken)}`);
+  assert.match(call.spoken[1], /last name/i);
+});
+
+// The other direction, which a word-matching guard got wrong: "no" answers two
+// knockout questions in a row and both are real answers.
+t('the same word twice is two answers when the bot asked twice', async () => {
+  const call = startCall();
+  await sleep(10);
+  for (const line of SCRIPTS.APPROVED) {
+    call.say(line);
+    await sleep(4);
+  }
+  await sleep(60);
+  assert.strictEqual(call.emails.length, 1);
+  const html = call.emails[0].html;
+  assert.match(html, /Approved/, 'a repeated "no" was swallowed and the call declined');
+});
+
+// English is stated, not detected. Handed a third of a second of audio the
+// transcriber decides badly: a caller saying his own surname got it back in Cyrillic,
+// and a one word "yes" to a read-back came back as the Turkish "o yuzden".
+t('the transcriber is told the call is in English', () => {
+  const s = earSession('gpt-realtime');
+  assert.strictEqual(s.session.audio.input.transcription.language, 'en');
 });
