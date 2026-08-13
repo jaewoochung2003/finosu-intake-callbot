@@ -10,7 +10,8 @@
     "test": "node test/run.js",
     "fetch-directory": "node tools/fetch-fedach.js",
     "preflight": "node tools/preflight.js",
-    "test:spoken": "node -e \"process.env.KEYPAD='off';require('./test/run.js')\""
+    "test:spoken": "node -e \"process.env.KEYPAD='off';require('./test/run.js')\"",
+    "paths": "node tools/simulate.js --all"
   },
   "dependencies": {
     "ws": "^8.18.0"

@@ -6,6 +6,7 @@
 // makes it a test rig and not a mock.
 //
 //   node tools/simulate.js                    interactive
+//   node tools/simulate.js --all              run every canned call and check each decision
 //   node tools/simulate.js --script approved  run a canned call
 //   node tools/simulate.js --script savings   ... and see it decline
 //   node tools/simulate.js --list             the canned calls
@@ -88,6 +89,45 @@ async function runScript(name) {
   await maybeEmail(session);
 }
 
+// Every canned call in one go, with what each one was supposed to decide next to
+// what it actually decided.
+//
+// The point is that the decision tree has more paths through it than anyone tests by
+// hand, and the paths that matter are the ones a caller reaches by answering
+// differently, not by answering badly: a savings account, a job that pays weekly, an
+// income named per paycheck, a knockout on the fifth question rather than the first.
+// One phone call takes five minutes and walks one path.
+async function runAll() {
+  // Same filter --list uses: scripts.js also exports two raw turn arrays the tests
+  // import directly, and those have no expected decision to check against.
+  const names = Object.keys(SCRIPTS).filter(
+    (k) => SCRIPTS[k] && Array.isArray(SCRIPTS[k].turns) && typeof SCRIPTS[k].expect === 'string',
+  );
+  const rows = [];
+  let bad = 0;
+  for (const name of names) {
+    const session = intake.startSession({ earlyKnockout, callSid: `sim-${name}` });
+    for (const line of SCRIPTS[name].turns) {
+      if (session.state !== 'in_progress') break;
+      intake.submit(session, line);
+    }
+    if (session.state === 'in_progress') intake.complete(session);
+    const got = session.outcome.decision;
+    const want = SCRIPTS[name].expect || null;
+    const ok = !want || want === got;
+    if (!ok) bad += 1;
+    rows.push({ name, got, want, ok, why: (session.outcome.reasons || []).map((r) => r.code).join(' ') });
+  }
+  const w = Math.max(...rows.map((r) => r.name.length));
+  for (const r of rows) {
+    const mark = r.want ? (r.ok ? 'ok  ' : 'WRONG') : '    ';
+    console.log(`${mark} ${r.name.padEnd(w)}  ${r.got.padEnd(10)} ${r.why}`);
+  }
+  console.log(`
+${rows.length} calls, ${bad} decided the wrong way`);
+  if (bad) process.exit(1);
+}
+
 // ---------- interactive ----------
 
 function runInteractive() {
@@ -146,6 +186,7 @@ function runInteractive() {
     }
     return;
   }
+  if (has('--all')) return runAll();
   const script = valueOf('--script');
   if (script) await runScript(script);
   else runInteractive();
