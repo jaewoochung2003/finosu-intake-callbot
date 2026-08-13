@@ -99,6 +99,21 @@ function nextPrompt(session) {
   return field ? field.ask : null;
 }
 
+// The question actually on the table. While a read-back is open that is the read-back,
+// not the field's own ask.
+//
+// Everything that refuses a turn used to answer it with `nextPrompt`, which reads the
+// field's ask. With a read-back open that is the wrong question: the caller has been
+// asked "is that right?", and a refusal answered them with "type the nine digit
+// routing number on your keypad", so they typed it again and the read-back they were
+// still being measured against stayed open behind it.
+function openPrompt(session) {
+  if (!session.pending) return nextPrompt(session);
+  const field = FIELDS.find((f) => f.key === session.pending.key);
+  if (!field) return nextPrompt(session);
+  return `${confirmLine(field, session.pending.value, session.record)} Is that right?`;
+}
+
 function finish(session, outcome) {
   session.state = 'complete';
   session.outcome = outcome;
@@ -158,6 +173,37 @@ function submit(session, said, opts = {}) {
     return step(session, { accepted: true });
   }
 
+  // Digits read out loud, arriving over more than one turn.
+  //
+  // The turn detector ends a turn on nine hundred milliseconds of silence, and a
+  // person reading a nine digit routing number off a cheque pauses longer than that
+  // between the groups. So "zero two one" arrives, then "zero zero zero", then "zero
+  // two one" again, and each one on its own fails a validator that wants nine digits.
+  // Three re-asks later the field gives up. This is what the keypad was hiding.
+  //
+  // Only for a field whose length is fixed and known, and only while what arrives is
+  // digits and nothing else: the moment the caller says a word, it is an answer and
+  // not a continuation. The running total is thrown away when the field is left.
+  if (field.digitsExact) {
+    const heard = P.spokenDigits(said);
+    const onlyDigits = heard.length > 0 && !/[a-z]/i.test(String(said).replace(/\b(oh|o|zero|one|two|three|four|five|six|seven|eight|nine|and|uh|um|er)\b/gi, '').trim());
+    const carried = session.digitRun && session.digitRun.key === field.key ? session.digitRun.digits : '';
+    if (onlyDigits && (carried || heard.length < field.digitsExact)) {
+      const joined = (carried + heard).slice(0, field.digitsExact);
+      if (joined.length < field.digitsExact) {
+        session.digitRun = { key: field.key, digits: joined };
+        const left = field.digitsExact - joined.length;
+        return {
+          accepted: false,
+          say: `Got ${P.numberWord ? P.numberWord(joined.length) : joined.length} so far. Keep going, ${left} more.`,
+          done: false,
+        };
+      }
+      said = joined;
+    }
+    session.digitRun = null;
+  }
+
   const result = field.validate(said, session.record);
 
   if (!result.ok) {
@@ -209,10 +255,12 @@ function submit(session, said, opts = {}) {
       // the reprompt already opens with the same words, and bridge.js builds the
       // spoken line as problem plus say_next, so a caller heard "I need the whole
       // date. I need the whole date. Month, day and year."
+      // The error goes in `problem` and nowhere else. It used to go in both, and
+      // bridge.js says the problem and then the question, so every rejection on every
+      // call was said twice: "I did not catch that. Sorry, I did not catch that. The
+      // work address one more time?"
       problem: result.reprompt ? null : result.error,
-      say: result.reprompt
-        ? result.reprompt
-        : `${result.error === undefined ? '' : `Sorry, ${result.error}. `}${field.reask || field.ask}`,
+      say: result.reprompt ? result.reprompt : field.reask || field.ask,
       done: false,
     };
   }
@@ -244,7 +292,10 @@ function submit(session, said, opts = {}) {
   // income figure). Only spokenNote was forwarded for a while, so the income
   // read-back existed and was never said — and a caller whose "3000" was heard as
   // "2000" found out from the decline email.
-  return step(session, { accepted: true, note: result.spokenNote || result.note || null });
+  return step(session, {
+    accepted: true,
+    note: result.spokenNote || result.note || echoOf(field, result.value),
+  });
 }
 
 // Yes, no, or a correction. A caller who hears their name back wrong rarely answers
@@ -463,6 +514,29 @@ function maybeKnockout(session, field) {
   return fired.length ? finishWith(session, 'Declined', fired) : null;
 }
 
+// What the bot says back before moving on: "Got it, 473."
+//
+// Every answer gets one, because silence is indistinguishable from a lost line. A
+// caller gave an apartment number, heard nothing back, said it again — and by then
+// the bot had asked for the city, so the second one went in as the city and the
+// application went out with a city called 473. He could not tell that the bot had
+// heard him and moved on, because moving on sounded exactly like not hearing him.
+//
+// Not on the fields that already read themselves back (the name, the email, the two
+// bank numbers), not on the ones a validator already writes a line for (the bank
+// name, the income figure), and never on a sensitive value. Not on a yes or a no
+// either: "got it, false" is not English.
+function echoOf(field, value) {
+  if (field.confirm || field.sensitive) return null;
+  if (typeof value === 'boolean' || value === null || value === undefined) return null;
+  const text = String(value).trim();
+  if (!text || text.length > 40) return null;
+  // A date is stored year-first and says nothing useful out loud. Those fields write
+  // their own note.
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
+  return `Got it, ${text}.`;
+}
+
 function step(session, { accepted, note }) {
   session.attempts = 0;
   session.index += 1;
@@ -652,6 +726,7 @@ module.exports = {
   startSession,
   currentField,
   nextPrompt,
+  openPrompt,
   submit,
   submitDtmf,
   undoLast,

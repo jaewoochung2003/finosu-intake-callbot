@@ -47,9 +47,17 @@ const CALLS_DIR = path.join(__dirname, '..', 'calls');
 // field where the length is a range, 4 to 17, so a partial entry validates and the
 // bot reads the half a caller typed back as though it were the whole number.
 const DTMF_IDLE_MS = 6000;
-// After a keypad entry lands, ignore anything the model tries to save for a moment;
-// it may still be transcribing the tones as speech.
-const DTMF_SUPPRESS_MS = 2500;
+// After a keypad entry lands, ignore anything the model tries to save; it may still
+// be transcribing the tones as speech.
+//
+// This is a ceiling, not the window. The window closes when the line the commit
+// wrote has finished being spoken (see response.done), because that is the first
+// moment the caller can be answering it — the mic is shut for the whole of the bot's
+// line. A flat 2.5 seconds was the wrong shape for both ends: too long against a
+// one-line acknowledgement, and far too short against a nine digit read-back, which
+// takes eight seconds to say and left the tail of it exposed. What is left here is
+// the guard against a line whose completion never arrives, so it is generous.
+const DTMF_SUPPRESS_MS = 15000;
 // A short deaf window on the keypad itself, to swallow the stray extra press on an
 // overtyped fixed-length field: type five digits for a four digit social and the
 // fifth would otherwise open an entry against the next question and corrupt it.
@@ -145,6 +153,9 @@ function handleCall(twilioWs, opts = {}) {
   let framesThisLine = 0;
   let bytesThisLine = 0;
   let droppedThisLine = 0;
+  // Chunks handed to the carrier, and chunks the carrier says it has played.
+  let marksSent = 0;
+  let marksPlayed = 0;
   let dtmfField = null;
   let dtmfTimer = null;
   let suppressSavesUntil = 0;
@@ -167,11 +178,34 @@ function handleCall(twilioWs, opts = {}) {
   // ours. Everything else the model generates is heard by nobody.
   const instructed = new Set();
   let awaitingInstructed = false;
-  // The response playing right now, and a line waiting for it to finish. The API
+  // The response playing right now, and the lines waiting for it to finish. The API
   // refuses a second response while one is running.
+  //
+  // This was a single slot, and the slot was the bug that made a clean call
+  // unfinishable. Two lines are written on the same turn whenever a keypad entry
+  // lands: the read-back the commit writes, and whatever the model's own save_answer
+  // for the same digits produces a moment later. The second overwrote the first, so
+  // the caller never heard "is that right?" while the server sat waiting for the
+  // answer to it. The bot asked for the account number, the server was still holding
+  // the routing read-back open, and every digit typed after that went back into the
+  // routing number. A queue costs an extra sentence in the rare case; the slot cost
+  // the whole call.
   let currentResponseId = null;
-  let queuedLine = null;
+  let queuedLines = [];
   let uninstructedFrames = 0;
+  let responseTag = 1;
+  // Whether the API has ever confirmed a response. See speak().
+  let seenCreated = false;
+  // The line the server asked for, kept until the model's own transcript of it comes
+  // back, so the two can be compared. Asking a model to say a line word for word is a
+  // request, not a guarantee, and the word it drops most often is the last one.
+  const lineByTag = new Map();
+  const lineByResponse = new Map();
+  let lastLineAskedFor = null;
+  // One repair per read-back. Without it a model that will not say the question turns
+  // into the bot asking "Is that right?" over and over at a caller who has stopped
+  // being asked anything.
+  let readBackRepaired = false;
 
   const openaiWs = openWebSocket(
     `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(OPENAI_MODEL)}`,
@@ -183,6 +217,36 @@ function handleCall(twilioWs, opts = {}) {
   };
   const toTwilio = (obj) => {
     if (twilioWs.readyState === WebSocket.OPEN) twilioWs.send(JSON.stringify(obj));
+  };
+
+  // Whichever question the log should be masked against: the one being read back if
+  // there is one, otherwise the one on the table.
+  const openKey = () =>
+    session.pending ? session.pending.key : (intake.currentField(session) || {}).key || '';
+
+  // The question a read-back ends with is sent as its own line.
+  //
+  // "Okay, Joe Mama. That's j o e m a m a. Is that right?" came back from the model
+  // as the name and the spelling and then nothing, on call after call, whatever the
+  // instructions said. The caller heard their name spelled at them and was never
+  // asked anything, so they said nothing, while the server sat holding a yes-or-no
+  // question open behind the silence. Asking a model to say a long line word for word
+  // is a request; the word it drops is the last one, and here the last one is the
+  // entire point of the line.
+  //
+  // Split, the question is four words in a response of its own. There is nothing
+  // after it to drop it in favour of, and if the first half is cut short the second
+  // half still arrives. This is the whole reason the split exists — not tidiness.
+  const READ_BACK_QUESTION = 'Is that right?';
+  const speakLine = (line, opts) => {
+    const text = String(line || '').trim();
+    const at = text.toLowerCase().lastIndexOf(READ_BACK_QUESTION.toLowerCase());
+    if (at > 0) {
+      speak(text.slice(0, at).trim(), opts);
+      speak(READ_BACK_QUESTION);
+      return;
+    }
+    speak(text, opts);
   };
 
   // Ask the model to say a specific line next. Used for the greeting, for keypad
@@ -208,11 +272,45 @@ function handleCall(twilioWs, opts = {}) {
       queuedBytes = 0;
       if (currentResponseId) instructed.delete(currentResponseId);
     }
-    if (responseActive) {
-      queuedLine = line;
+    // `awaitingInstructed` is the half-second nobody was counting.
+    //
+    // `responseActive` only turns on when response.created comes back. Between asking
+    // for a response and being told it exists, it reads false, so a line arriving in
+    // that gap was sent straight out as a second response.create while the first was
+    // still being set up. The API allows one response at a time and refuses the
+    // second, and nothing caught the refusal, so that line was never spoken at all —
+    // the caller was asked nothing and sat waiting, and the question they never heard
+    // stayed open behind the silence. That is a whole question going missing, not the
+    // tail of one. Treat "asked for but not yet created" as busy.
+    // Gated on having seen the API confirm a response at least once, so the fake
+    // sockets in the tests — which drive tool calls without the response lifecycle
+    // around them — are not held behind a confirmation that is never coming.
+    if (responseActive || (seenCreated && awaitingInstructed)) {
+      // Never drop a line that is holding a question open. Anything queued behind a
+      // read-back waits its turn instead of replacing it.
+      if (queuedLines.length >= 3) {
+        log(session.callSid, 'line queue full, dropping:', V.redact(openKey(), line).slice(0, 60));
+        return;
+      }
+      queuedLines.push(line);
       return;
     }
     awaitingInstructed = true;
+    // Tag the response so it can be recognised when it comes back.
+    //
+    // Recognising it by "the next response created after this one was asked for" was
+    // a race, and the race is why callers heard sentences the server never wrote.
+    // Server VAD creates its own response the moment the caller stops talking, and
+    // when that landed between the ask and the created event it took the label: the
+    // model's freeform line was played to the caller as though the server had written
+    // it, and the server's actual line arrived in an unlabelled response and was
+    // muted. That is where "I'm ready for the next step" and "we're almost done" came
+    // from, and it is why the line that was supposed to follow them never played.
+    // The tag rides on the request and comes back on the event, so there is nothing
+    // left to guess at.
+    const tag = `s${responseTag++}`;
+    lineByTag.set(tag, line);
+    lastLineAskedFor = line;
     // Word for word, not "in your own voice." Every line here is already written to
     // be spoken, and the paraphrase latitude let the model drop the "Is that right?"
     // off a read-back and turn "spell your first name" into "your last name". The
@@ -220,6 +318,7 @@ function handleCall(twilioWs, opts = {}) {
     toOpenai({
       type: 'response.create',
       response: {
+        metadata: { server_line: tag },
         instructions:
           'Say this line to the caller, out loud, word for word from the first word to the ' +
           'last, including the question at the end if there is one. Do not add anything before ' +
@@ -252,10 +351,20 @@ function handleCall(twilioWs, opts = {}) {
         // the errors that matter in a log someone reads after a bad call.
         if ((msg.error || {}).code === 'response_cancel_not_active') break;
         log(session.callSid, 'openai error:', JSON.stringify(msg.error || msg));
+        // A refused response.create is a line the caller will never hear. Put it back
+        // in the queue rather than losing it in a log nobody reads during a call.
+        if (/active response|already has/i.test(JSON.stringify(msg.error || {}))) {
+          awaitingInstructed = false;
+          if (lastLineAskedFor) {
+            log(session.callSid, 'requeueing the line the API refused');
+            queuedLines.unshift(lastLineAskedFor);
+          }
+        }
         break;
 
       case 'response.created':
         responseActive = true;
+        seenCreated = true;
         speakingSince = Date.now();
         lastActivity = Date.now();
         // Two responses happen on every caller turn, and only one of them is ours.
@@ -270,9 +379,21 @@ function handleCall(twilioWs, opts = {}) {
         // is simply not played.
         if (msg.response && msg.response.id) {
           currentResponseId = msg.response.id;
-          if (awaitingInstructed) {
+          // The tag decides, when there is one. A response carrying no metadata at
+          // all is either the model's own (mute it) or one of the fake sockets in the
+          // tests, which is what the flag still covers.
+          const tagged = msg.response.metadata && msg.response.metadata.server_line;
+          if (tagged) {
             instructed.add(msg.response.id);
             awaitingInstructed = false;
+            if (lineByTag.has(tagged)) {
+              lineByResponse.set(msg.response.id, lineByTag.get(tagged));
+              lineByTag.delete(tagged);
+            }
+          } else if (msg.response.metadata === undefined && awaitingInstructed) {
+            instructed.add(msg.response.id);
+            awaitingInstructed = false;
+            if (lastLineAskedFor) lineByResponse.set(msg.response.id, lastLineAskedFor);
           }
         }
         break;
@@ -305,6 +426,12 @@ function handleCall(twilioWs, opts = {}) {
           // is 8000 bytes a second, and base64 carries three bytes in four characters.
           const chunkBytes = Math.round((msg.delta.length * 3) / 4);
           markQueue.push(chunkBytes);
+          // Twilio sends a mark back once it has PLAYED that chunk. Counting both
+          // ends is the only way to tell a line the bot generated from a line the
+          // caller heard, and the caller kept reporting silence on lines the log
+          // showed being spoken with plenty of audio behind them. Sent and played,
+          // side by side, ends the argument.
+          marksSent += 1;
           queuedBytes += chunkBytes;
           framesThisLine += 1;
           bytesThisLine += msg.delta.length;
@@ -313,6 +440,16 @@ function handleCall(twilioWs, opts = {}) {
           // goes nowhere. The caller hears silence while the log shows the bot spoke.
           droppedThisLine += 1;
         }
+        break;
+
+      // The caller finished saying something. This is the only proof the server has
+      // that they said anything at all, and it is proof the model cannot manufacture:
+      // the event comes from the audio, and the mic is shut for the whole of the bot's
+      // line, so it fires only for sound the caller actually made into an open mic.
+      case "input_audio_buffer.speech_stopped":
+        callerTurns += 1;
+        lastActivity = Date.now();
+        nudged = false;
         break;
 
       // The caller started talking over the bot. Not in the first moment of a line
@@ -392,9 +529,33 @@ function handleCall(twilioWs, opts = {}) {
           // a read-back that logs 1.2s did not deliver its question.
           const seconds = ((bytesThisLine * 3) / 4 / 8000).toFixed(1);
           const carried = framesThisLine > 0
-            ? `[${framesThisLine} frames, ${seconds}s audio]`
+            ? `[${framesThisLine} frames, ${seconds}s audio, carrier played ${marksPlayed}/${marksSent}]`
             : `[NO AUDIO SENT${droppedThisLine ? `, ${droppedThisLine} deltas dropped, no stream` : ''}]`;
           log(session.callSid, 'bot:', spoken.slice(0, 160), carried);
+
+          // Did the question at the end of the line actually get said?
+          //
+          // "Say it word for word" is a request to a model, not a guarantee, and the
+          // word it drops is the last one. A read-back that arrives without its
+          // question is the worst possible shape of that failure: the caller hears
+          // their name spelled and then silence, so they say nothing, while the server
+          // sits holding a yes-or-no question open and reads whatever they eventually
+          // say as the answer to it. That is the "sometimes it asks and sometimes it
+          // doesn't" — it was never once, it was every time the model felt like it.
+          //
+          // The line the server asked for is kept, so this is a comparison rather than
+          // a guess. If the question is missing from what came back, it is asked on its
+          // own, which is short enough that there is nothing left to drop off the end.
+          const asked = lineByResponse.get(msg.response_id) || (msg.response_id ? null : lastLineAskedFor);
+          const wanted = asked && /\bis that right\?/i.test(asked);
+          const said = /\bis that right\b/i.test(msg.transcript);
+          if (wanted && !said && session.pending && !readBackRepaired) {
+            readBackRepaired = true;
+            log(session.callSid, 'the read-back came back without its question, asking it on its own');
+            speak('Is that right?');
+          }
+          if (said) readBackRepaired = false;
+
           framesThisLine = 0;
           bytesThisLine = 0;
           droppedThisLine = 0;
@@ -404,13 +565,37 @@ function handleCall(twilioWs, opts = {}) {
       case 'response.done': {
         responseActive = false;
         currentResponseId = null;
-        // A line that arrived while this one was running goes out now.
-        if (queuedLine !== null) {
-          const next = queuedLine;
-          queuedLine = null;
+        // A line that arrived while this one was running goes out now, in the order
+        // it was written.
+        if (queuedLines.length) {
+          const next = queuedLines.shift();
           speak(next);
         }
-        if (msg.response && msg.response.id) instructed.delete(msg.response.id);
+        // The keypad window closes when the line the keypad wrote has been said.
+        //
+        // A clock alone cannot separate the model's write-down of the touch tones from
+        // the caller's "yes" to the read-back; both arrive soon after the entry lands.
+        // What separates them is delivery. The mic is held shut for the whole of the
+        // bot's line, so a real yes cannot reach the model until the read-back has been
+        // spoken, and the write-down is generated from audio heard before it started.
+        // So the window runs from the commit to the end of the server's next line
+        // rather than for a fixed two and a half seconds, which was both too long for a
+        // fast read-back and too short for a nine digit one.
+        // Not while a line is still waiting its turn: the response finishing here is
+        // then the one that was already in flight when the entry landed, not the line
+        // the entry produced, and the caller has still not heard the question.
+        if (
+          msg.response &&
+          msg.response.id &&
+          instructed.has(msg.response.id) &&
+          queuedLines.length === 0
+        ) {
+          suppressSavesUntil = 0;
+        }
+        if (msg.response && msg.response.id) {
+          instructed.delete(msg.response.id);
+          lineByResponse.delete(msg.response.id);
+        }
         if (uninstructedFrames) {
           log(session.callSid, 'muted', uninstructedFrames, 'frames the model spoke unprompted');
           uninstructedFrames = 0;
@@ -456,6 +641,39 @@ function handleCall(twilioWs, opts = {}) {
   // turn. The comparison cost every caller their entry.
   const keypadOwnsTheTurn = () => dtmfBuffer.length > 0;
 
+  // The same answer arriving twice, once per question, as the form moves under it.
+  // Held to answers with a digit in them and to a few seconds, so an honest repeat
+  // ("no", then "no") still counts twice.
+  // One caller turn, one answer. A turn is counted when the voice detector says the
+  // caller stopped talking, and spent when a save consumes it. A save arriving with
+  // nothing new behind it is the model filling in the blank.
+  //
+  // The fake sockets in the tests drive tool calls without the audio events around
+  // them, so with no voice detection ever seen the check stands down — the same shape
+  // as the response-lifecycle gate above, and for the same reason.
+  // Counted rather than timed. Two turns can land in the same millisecond as far as a
+  // clock is concerned, and a comparison that then reads the second one as already
+  // spent refuses a real answer.
+  let callerTurns = 0;
+  let turnsUsed = 0;
+  const callerActuallySpoke = () => {
+    if (callerTurns === 0) return true;
+    if (callerTurns <= turnsUsed) return false;
+    turnsUsed = callerTurns;
+    return true;
+  };
+
+  const ECHO_MS = 6000;
+  let lastAccepted = { text: '', key: '', at: 0 };
+  const isEchoOfTheLastAnswer = (answer) => {
+    const text = String(answer || '').trim().toLowerCase();
+    if (!text || !/\d/.test(text)) return false;
+    if (text !== lastAccepted.text) return false;
+    if (Date.now() - lastAccepted.at > ECHO_MS) return false;
+    const open = intake.currentField(session);
+    return !!open && open.key !== lastAccepted.key;
+  };
+
   // Whether the question on the table refuses spoken answers outright.
   const keypadOnlyQuestion = () => {
     const open = intake.currentField(session);
@@ -475,14 +693,95 @@ function handleCall(twilioWs, opts = {}) {
 
     let result;
     if (name === 'save_answer') {
-      if (isNotSpeech(args.answer)) {
+      if (name === 'save_answer' && !callerActuallySpoke()) {
+        // The model answering its own question.
+        //
+        // On a live call the bot asked "Okay, Joe Mama. That's j o e m a m a. Is that
+        // right?" and then filed save_answer("Yes, that's right.") and moved on to the
+        // email address. The caller had not made a sound. There was no transcript for
+        // it in the log, because there was nothing to transcribe.
+        //
+        // This is not a prompt problem and no wording fixes it. A model handed a turn
+        // produces a plausible continuation of the conversation, and after a yes-or-no
+        // question the plausible continuation is a yes. It cannot tell "I heard them
+        // say yes" apart from "a yes belongs here", because from inside the turn those
+        // are the same thing.
+        //
+        // The server can tell, because the carrier reports when the caller's audio
+        // started and stopped, and the mic is shut for the whole of the bot's line. No
+        // speech since the last answer means no answer.
+        //
+        // An earlier version of this check demanded the transcript, and transcription
+        // lags the speech by a second or more, so real answers were refused and the
+        // call looped. This one waits on the voice detector, which fires as it
+        // happens, and it says nothing when it refuses — the question is already
+        // asked, and the caller is being given time, not talked at.
+        log(session.callSid, 'refused a save with no caller turn behind it:', JSON.stringify(String(args.answer || '').slice(0, 40)));
+        result = { accepted: false, silent: true, problem: 'the caller has not answered yet' };
+      } else if (isEchoOfTheLastAnswer(args.answer)) {
+        // The same words filed twice, against two questions in a row.
+        //
+        // On a live call the caller said "four seven three" for the apartment number.
+        // It was accepted, the form moved to the city, and the same utterance came
+        // back a second time and was written into the city, which went out on the
+        // application as a city called 473. The transcriber and the model both report
+        // a turn and they do not always agree on when it ended, so one answer can
+        // arrive twice with the form one question further on the second time.
+        //
+        // Only an answer carrying a digit, and only within a few seconds, because
+        // repeating yourself is otherwise normal: "no" answers two knockout questions
+        // in a row and both of those are real.
+        log(session.callSid, 'refused an answer already filed against the last question');
+        result = {
+          accepted: false,
+          silent: true,
+          problem: 'that was the previous answer',
+          say_next: intake.openPrompt(session),
+        };
+      } else if (isNotSpeech(args.answer)) {
         // Nothing was said. Say so like a person would and ask again, rather than
         // writing silence into the form or repeating the question with no reason.
         log(session.callSid, 'ignored a save from silence:', JSON.stringify(String(args.answer || '')));
         result = {
           accepted: false,
           problem: 'Sorry, I did not catch that',
-          say_next: intake.nextPrompt(session),
+          say_next: intake.openPrompt(session),
+        };
+      } else if (keypadOwnsTheTurn() || Date.now() < suppressSavesUntil) {
+        // The model hears the touch tones as audio and writes them down as words. The
+        // window after a committed entry caught that, but nothing covered the entry
+        // itself, so a caller typing a routing number while the question was still
+        // playing had the tones transcribed mid-entry and filed as the answer. That is
+        // where "473" came from on a live call: it went in as the apartment number and
+        // then as the city, while the digits it was made of were still being typed.
+        //
+        // `typing` covers the entry, the window covers the moment after it.
+        //
+        // This used to stand down whenever a read-back was open, on the reasoning that
+        // the caller's "yes" arrives inside the window and must not be swallowed. It
+        // does not. The mic is held shut for the whole of the bot's line, so the
+        // earliest a real yes can reach the model is after the read-back has finished
+        // playing, and a nine digit read-back takes eight seconds to say. What did
+        // arrive inside the window was the model's write-down of the touch tones, and
+        // with the check standing down it went in as the answer to "is that right?".
+        // That is the bug that made a clean call unfinishable: the routing number was
+        // answered by its own tones, the read-back was spent on them, and the caller
+        // was sent back to type the same nine digits again.
+        //
+        // It is also checked BEFORE the keypad-only refusal below. The other order
+        // read the write-down as the caller speaking on a question that takes digits
+        // and answered it with "I need that on the keypad" — a correction, out loud,
+        // for something the caller had done right and by keypad.
+        log(session.callSid, 'refused a save inside the keypad window:', dtmfBuffer.length ? 'mid-entry' : 'just committed');
+        result = {
+          accepted: false,
+          // The model is told it was refused, so it does not go looking for words of
+          // its own. Nothing is said out loud: the line for the digits that just
+          // landed — the read-back, or the next question — is already playing or
+          // queued behind this, and an entry still being typed must not be talked over.
+          silent: true,
+          problem: 'already captured from the keypad',
+          say_next: intake.openPrompt(session),
         };
       } else if (keypadOnlyQuestion() && !session.pending) {
         // Four questions take digits and nothing else: the social security digits, the
@@ -498,25 +797,14 @@ function handleCall(twilioWs, opts = {}) {
           problem: 'I need that on the keypad',
           say_next: open.ask,
         };
-      } else if ((keypadOwnsTheTurn() || Date.now() < suppressSavesUntil) && !session.pending) {
-        // The model hears the touch tones as audio and writes them down as words. The
-        // window after a committed entry caught that, but nothing covered the entry
-        // itself, so a caller typing a routing number while the question was still
-        // playing had the tones transcribed mid-entry and filed as the answer. That is
-        // where "473" came from on a live call: it went in as the apartment number and
-        // then as the city, while the digits it was made of were still being typed.
-        //
-        // `typing` covers the entry, the window covers the moment after it. Neither
-        // may swallow the yes that answers a read-back: the entry is followed straight
-        // away by "I have 5 5 1 2..., is that right?", and the caller answers inside
-        // the window every time, which is what the pending check is for.
-        result = {
-          accepted: false,
-          problem: 'already captured from the keypad',
-          say_next: intake.nextPrompt(session),
-        };
       } else {
-        result = toResult(intake.submit(session, String(args.answer ?? '')));
+        const answer = String(args.answer ?? '');
+        const wasOn = (intake.currentField(session) || {}).key || '';
+        result = toResult(intake.submit(session, answer));
+        // Remembered whether or not it was accepted: a rejected answer repeated back
+        // by the transcriber is the same echo, and the question it was rejected on is
+        // the one it must not be filed against a second time.
+        lastAccepted = { text: answer.trim().toLowerCase(), key: wasOn, at: Date.now() };
       }
     } else if (name === 'redo_previous') {
       // A read-back is already a question about the value, so the server owns every
@@ -592,10 +880,44 @@ function handleCall(twilioWs, opts = {}) {
       .filter(Boolean)
       .join(' ')
       .trim();
+    // Every tool call and the line it produced, in one place.
+    //
+    // Reconstructing a bad call from the log meant reading the bot's lines and the
+    // keypad presses and guessing at what the model had reported in between, and the
+    // guessing was wrong three times. The turn the model took, the branch that handled
+    // it and the line that went back are the whole of the exchange; without them the
+    // one thing needed to diagnose a call is the one thing not written down.
+    if (name === 'save_answer') {
+      log(
+        session.callSid,
+        `save: ${JSON.stringify(V.redact(openKey(), String(args.answer ?? '')).slice(0, 60))}`,
+        `-> ${result.accepted ? 'accepted' : result.silent ? 'silent' : 'refused'}`,
+        `pending=${session.pending ? session.pending.key : 'no'}`,
+        `next=${JSON.stringify(V.redact(openKey(), line).slice(0, 70))}`,
+      );
+    }
+
     // No cancel here: the response this tool call arrived in is already finishing,
     // and asking to cancel it races the API into an error on every single turn.
-    if (line) speak(line);
-    else toOpenai({ type: 'response.create' });
+    //
+    // A silent result asks for no response at all. The line that belongs to this
+    // moment was written by the keypad and is already on its way; creating a response
+    // here either talks over it or, with no line to carry, hands the model an empty
+    // turn to fill in its own words, which is where the sentences the server never
+    // wrote came from.
+    if (result.silent) {
+      // Nothing to send. The keypad wrote the line for this moment and already sent
+      // it, and a caller still typing must not be talked over. If that line somehow
+      // never lands the quiet watch picks the call back up.
+    } else if (line) {
+      speakLine(line);
+    } else {
+      // An untagged `response.create` used to go out here. It is a blank turn: the
+      // model has no line to say, so it writes its own, and an untagged response is
+      // muted, so the caller hears nothing at all while the bot talks to itself. The
+      // question on the table is always sayable, so say that.
+      speakLine(intake.openPrompt(session) || "Go ahead.");
+    }
 
     if (result.done) closeOut('script complete');
   }
@@ -656,6 +978,20 @@ function handleCall(twilioWs, opts = {}) {
         ) {
           break;
         }
+        // Touch tones are not speech and must never reach the transcriber. They were
+        // reaching it: the tones travel in the caller's audio, the model wrote them
+        // down as words, and the write-down came back as a save_answer for a question
+        // the keypad had already answered. On a read-back that save was read as the
+        // caller's reply to "is that right?" — nine digits of tone noise answering a
+        // yes-or-no question — and the routing number was confirmed, rejected or
+        // re-asked by something the caller never said. Holding the mic shut from the
+        // first press until the entry has settled removes the whole class.
+        // Only for as long as an entry is actually open. The refusal window that runs
+        // on past the commit is not used here on purpose: it can run for fifteen
+        // seconds, and holding the caller's mic shut for fifteen seconds to catch a
+        // stray transcription trades a small fault for a call nobody can talk on. The
+        // tail that leaks out past the last press is caught downstream instead.
+        if (typing || dtmfBuffer.length > 0) break;
         toOpenai({ type: 'input_audio_buffer.append', audio: data.media.payload });
         break;
 
@@ -665,6 +1001,7 @@ function handleCall(twilioWs, opts = {}) {
 
       case 'mark':
         queuedBytes = Math.max(0, queuedBytes - (markQueue.shift() || 0));
+        marksPlayed += 1;
         break;
 
       case 'stop':
@@ -825,7 +1162,7 @@ function handleCall(twilioWs, opts = {}) {
     const line = r.accepted
       ? `${r.note ? `${r.note}. ` : ''}${r.say || ''}`
       : `${r.problem ? `${r.problem}. ` : ''}${r.say || ''}`;
-    speak(line.trim() || 'Thanks.', { cancelFirst: true });
+    speakLine(line.trim() || "Thanks.", { cancelFirst: true });
 
     if (r.done) closeOut('script complete');
   }

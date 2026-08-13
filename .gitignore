@@ -13,3 +13,5 @@ bin/
 # logs and scratch
 *.log
 .probe/
+
+line-sample.wav

@@ -284,7 +284,11 @@ const FIELDS = [
     key: 'monthly_income',
     label: 'Monthly income',
     group: 'Employment',
-    ask: "And roughly how much do you bring in a month? A ballpark is fine, or tell me what one paycheck is and I'll work it out.",
+    // The offer to work it out from one paycheck is gone from the question. The
+    // parser still understands "twelve hundred a paycheck" if a caller volunteers it,
+    // because they do, but offering it made the question two questions long and gave
+    // the caller a choice to make before answering.
+    ask: 'And roughly how much do you bring in a month? A ballpark is fine.',
     reask: 'A rough dollar figure is all I need.',
     knockout: true,
     // Skipped for the unemployed: employment_status already set this to 0. No skipValue,
@@ -369,6 +373,8 @@ const FIELDS = [
     group: 'Applicant',
     ask: 'Type the last four digits of your social security number on your keypad.',
     reask: 'Type those four digits on the keypad.',
+    askSpoken: 'What are the last four digits of your social security number? Say them one digit at a time.',
+    reaskSpoken: 'Those four digits again, one at a time.',
     keypadOnly: true,
     dtmf: 4,
     sensitive: true,
@@ -380,6 +386,8 @@ const FIELDS = [
     group: 'Bank Account',
     ask: 'Type the nine digit routing number on your keypad.',
     reask: 'Type the nine digits again.',
+    askSpoken: "What's your nine digit routing number? Say it one digit at a time.",
+    reaskSpoken: 'The nine digits again, one at a time.',
     keypadOnly: true,
     dtmf: 9,
     sensitive: true,
@@ -403,6 +411,8 @@ const FIELDS = [
     // the half they typed is a valid length for an account number.
     ask: 'Type the account number on your keypad, then press pound.',
     reask: 'Type the account number again, then press pound.',
+    askSpoken: "What's your account number? Say it one digit at a time.",
+    reaskSpoken: 'The account number again, one digit at a time.',
     keypadOnly: true,
     dtmf: 17,
     sensitive: true,
@@ -456,6 +466,8 @@ const FIELDS = [
     group: 'Address',
     ask: 'Type your five digit zip code on the keypad.',
     reask: 'Type the five digits again.',
+    askSpoken: "And the zip code?",
+    reaskSpoken: 'The five digits again.',
     keypadOnly: true,
     dtmf: 5,
     validate: (said) => V.validateZip(said),
@@ -551,6 +563,47 @@ const FORM_ORDER = [
 const FORM_ONLY = {
   name: { key: 'name', label: 'Name', group: 'Applicant' },
 };
+
+// ---------- the keypad, on or off ----------
+//
+// Off by default. The keypad is the accurate way to give a routing number and it is
+// still here, but it costs the one thing that matters more: a call that finishes.
+// Touch tones and a speech model share a turn badly — the model hears the tones and
+// writes them down, and every line the server sends has to be arranged around an
+// entry that may be half typed. With it off there is one way in and nothing to
+// arrange around.
+//
+// KEYPAD=on in .env puts it back. Nothing is deleted; the questions change and the
+// digit lengths move from `dtmf` (which bridge.js reads as "this question takes
+// touch tones") to `digits` (which intake reads as "this many digits are expected,
+// however they arrive").
+const KEYPAD_ON = /^(1|on|true|yes)$/i.test(String(process.env.KEYPAD || 'off'));
+
+if (!KEYPAD_ON) {
+  for (const f of FIELDS) {
+    // A fixed-length number read out loud arrives in pieces. Somebody reading nine
+    // digits off a cheque pauses between the groups, the turn detector ends the turn
+    // in the gap, and three digits reach a validator that wants nine. With the keypad
+    // there this failed into "type it instead"; without it, it is the end of the call.
+    // The exact length is what makes the pieces addable, so it is recorded here and
+    // intake keeps a running total against it.
+    //
+    // Not the account number: four to seventeen digits is a range, so there is no
+    // length to count toward. It is read back to the caller instead, which is the
+    // check that a partial one fails.
+    // Only the questions that were keypad-only. The date of birth and the text
+    // number take digits as an escape hatch but are normally answered in words, and
+    // counting toward a length there broke the ordinary answer: "3 4 94" is a whole
+    // date, four digits long, and it started waiting for four more.
+    if (f.keypadOnly && f.dtmf && f.key !== 'account_number') f.digitsExact = f.dtmf;
+    delete f.dtmf;
+    if (f.keypadOnly) {
+      delete f.keypadOnly;
+      if (f.askSpoken) f.ask = f.askSpoken;
+      if (f.reaskSpoken) f.reask = f.reaskSpoken;
+    }
+  }
+}
 
 const BY_KEY = { ...Object.fromEntries(FIELDS.map((f) => [f.key, f])), ...FORM_ONLY };
 

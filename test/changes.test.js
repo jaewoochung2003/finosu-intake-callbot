@@ -149,7 +149,7 @@ t('a field given up on is marked, not silently missing', () => {
   assert.ok(m.per_field.find((f) => f.field === 'routing_number').gave_up);
 });
 
-t('the keypad shows up as the source', () => {
+tKeypad('the keypad shows up as the source', () => {
   const s = intake.startSession({ callSid: 'test' });
   for (const line of SCRIPTS.APPROVED.slice(0, SCRIPTS.INDEX.ssn)) intake.submit(s, line);
   intake.submitDtmf(s, '4821');

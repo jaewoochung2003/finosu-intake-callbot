@@ -13,7 +13,14 @@ require('./env');
 
 const http = require('http');
 const { WebSocketServer } = require('ws');
-const { handleCall } = require('./bridge');
+// Two bridges, and the difference is who holds the turn.
+//
+// bridge-voice.js is the default: the server makes its own speech and the model only
+// listens. bridge.js is the older one, where the model speaks the server's lines and
+// files the caller's answers through a tool. It is kept because it is the only path
+// that takes touch tones, so KEYPAD=on selects it.
+const KEYPAD_ON = /^(1|on|true|yes)$/i.test(String(process.env.KEYPAD || 'off'));
+const { handleCall } = KEYPAD_ON ? require('./bridge') : require('./bridge-voice');
 
 const PORT = Number(process.env.PORT || 5050);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;

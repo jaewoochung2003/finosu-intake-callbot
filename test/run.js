@@ -7,6 +7,12 @@
 // which meant an async test that threw after its first await was counted as a pass
 // and its failure surfaced as an unhandled rejection nobody read.
 
+// The keypad is off on a live call and on in here, because both paths are real code
+// and both have to keep working. fields.js reads this once, at require time, so it is
+// set before anything is loaded. `npm run test:spoken` runs the same suite with it
+// off, which is the path a caller actually gets.
+if (process.env.KEYPAD === undefined) process.env.KEYPAD = 'on';
+
 const files = [
   './parse.test.js',
   './validate.test.js',
@@ -15,11 +21,22 @@ const files = [
   './changes.test.js',
   './regressions.test.js',
   './bridge.test.js',
+  './bridge-voice.test.js',
   './carrier.test.js',
 ];
 
 let queue = [];
 global.t = (name, fn) => queue.push({ name, fn });
+// A test about touch tones themselves. There are no touch tones with the keypad off,
+// so it is not a failure that these do not run — there is nothing there to test.
+global.tKeypad = (name, fn) => {
+  if (process.env.KEYPAD !== 'off') queue.push({ name, fn });
+};
+// The mirror of it: a test about giving a number out loud, which only exists as a
+// path when there is no keypad to give it on.
+global.tSpoken = (name, fn) => {
+  if (process.env.KEYPAD === 'off') queue.push({ name, fn });
+};
 
 (async () => {
   let pass = 0;

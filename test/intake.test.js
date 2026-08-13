@@ -88,8 +88,13 @@ t('the re-ask says what was actually wrong', () => {
   for (const line of SCRIPTS.APPROVED.slice(0, SCRIPTS.INDEX.routing)) intake.submit(s, line);
   const r = intake.submit(s, 'three one zero zero zero zero one eight five');
   assert.strictEqual(r.accepted, false);
+  // The reason goes in `problem` and the question goes in `say`, once each.
+  // bridge.js speaks the problem and then the question, so an error that appeared in
+  // both came out of the phone twice: "I did not catch that. Sorry, I did not catch
+  // that. The work address one more time?" This test used to require that.
   assert.match(r.problem, /directory/);
-  assert.match(r.say, /directory/);
+  assert.doesNotMatch(r.say, /directory/, 'the reason is said twice');
+  assert.match(r.say, /nine digits again/i);
 });
 
 // ---------- knockouts ----------
@@ -171,7 +176,7 @@ t('back after a routing number clears the bank name too', () => {
 
 // ---------- keypad ----------
 
-t('typed digits fill the field without speech', () => {
+tKeypad('typed digits fill the field without speech', () => {
   const s = intake.startSession({ callSid: 'test' });
   for (const line of SCRIPTS.APPROVED.slice(0, SCRIPTS.INDEX.ssn)) intake.submit(s, line);
   assert.strictEqual(intake.currentField(s).key, 'ssn_last_four');
@@ -259,4 +264,52 @@ t('the HTML body escapes what came off the call', () => {
   const html = format.emailHtml(s);
   assert.ok(!html.includes('<script>'));
   assert.ok(html.includes('&lt;script&gt;'));
+});
+
+// ---------- digits given out loud, over more than one turn ----------
+//
+// The turn detector ends a turn on 900ms of silence, and a person reading nine digits
+// off a cheque pauses longer than that between the groups. Each piece on its own fails
+// a validator that wants nine, and three pieces in the field gives up. With a keypad
+// this failed into "type it instead". Without one it is the end of the call, so the
+// pieces are added up.
+const IN = require('../src/intake');
+
+function walk(session, answers) {
+  for (const a of answers) IN.submit(session, a);
+  return session;
+}
+
+tSpoken('a routing number read in three pieces is one routing number', () => {
+  const s = IN.startSession({ from: '+16508629110' });
+  // Everything up to the routing number, then the number in the groups a person reads.
+  const SCRIPTS = require('../tools/scripts');
+  for (let i = 0; i < SCRIPTS.INDEX.routing; i++) IN.submit(s, SCRIPTS.APPROVED[i]);
+  const a = IN.submit(s, 'zero two one');
+  assert.strictEqual(a.accepted, false, 'three digits were taken as a whole routing number');
+  assert.match(a.say, /keep going/i, `no continuation offered: ${a.say}`);
+  IN.submit(s, 'zero zero zero');
+  const c = IN.submit(s, 'zero two one');
+  assert.strictEqual(s.record.routing_number, '021000021', `got ${s.record.routing_number}`);
+  assert.match(c.say, /is that right/i, 'the assembled number was not read back');
+});
+
+tSpoken('a word in the middle of the digits ends the run instead of adding to it', () => {
+  const s = IN.startSession({ from: '+16508629110' });
+  const SCRIPTS = require('../tools/scripts');
+  for (let i = 0; i < SCRIPTS.INDEX.routing; i++) IN.submit(s, SCRIPTS.APPROVED[i]);
+  IN.submit(s, 'zero two one');
+  // Not a continuation. A caller who starts over says so, and the words are the tell.
+  const r = IN.submit(s, 'sorry let me start again');
+  assert.strictEqual(s.record.routing_number, undefined, 'a sentence was added to the digits');
+  assert.ok(r.say, 'the caller was left with nothing to answer');
+});
+
+tSpoken('the whole number said at once still works', () => {
+  const s = IN.startSession({ from: '+16508629110' });
+  const SCRIPTS = require('../tools/scripts');
+  for (let i = 0; i < SCRIPTS.INDEX.routing; i++) IN.submit(s, SCRIPTS.APPROVED[i]);
+  const r = IN.submit(s, 'zero two one zero zero zero zero two one');
+  assert.strictEqual(s.record.routing_number, '021000021');
+  assert.match(r.say, /is that right/i);
 });

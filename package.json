@@ -9,7 +9,8 @@
     "sim": "node tools/simulate.js",
     "test": "node test/run.js",
     "fetch-directory": "node tools/fetch-fedach.js",
-    "preflight": "node tools/preflight.js"
+    "preflight": "node tools/preflight.js",
+    "test:spoken": "node -e \"process.env.KEYPAD='off';require('./test/run.js')\""
   },
   "dependencies": {
     "ws": "^8.18.0"

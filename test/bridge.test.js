@@ -309,7 +309,7 @@ t('the fields nothing can check are read back and wait for a yes', () => {
   assert.match(lastToolResult().say_next, /Spell out the whole address/);
 });
 
-t('the tones of a half-typed number are never filed as the answer', () => {
+tKeypad('the tones of a half-typed number are never filed as the answer', () => {
   // The model hears touch tones as audio and writes them down as words. Only the
   // moment after a committed entry was covered, so a caller typing while the question
   // was still playing had the tones transcribed mid-entry and saved: on a live call
@@ -330,7 +330,7 @@ t('the tones of a half-typed number are never filed as the answer', () => {
   assert.match(spoken, /Is that right/i, 'the completed keypad entry was not read back');
 });
 
-t('finishing a keypad entry mid-line never cancels the model', () => {
+tKeypad('finishing a keypad entry mid-line never cancels the model', () => {
   // A caller typing the routing number while the question was still playing hit the
   // ninth digit and the read-back went out with cancelFirst, cutting the model off.
   // The model treats that as something to recover from and writes itself extra lines,
@@ -456,9 +456,15 @@ const TYPED = {
   [SCRIPTS.INDEX.zip]: '94404',
 };
 
+// With the keypad off those same four questions are answered out loud, so the walk
+// says the digits instead of typing them. Both modes are real; this is what lets one
+// suite drive either.
+const KEYPAD_ON = process.env.KEYPAD !== 'off';
+
 function playTurn(call, i) {
-  if (TYPED[i]) call.press(TYPED[i]);
-  else call.say(SCRIPTS.APPROVED[i]);
+  if (!TYPED[i]) return call.say(SCRIPTS.APPROVED[i]);
+  if (KEYPAD_ON) return call.press(TYPED[i]);
+  call.say(TYPED[i].replace('#', ''));
 }
 
 function walkTo(call, index) {
@@ -469,7 +475,7 @@ function playAll(call) {
   for (let i = 0; i < SCRIPTS.APPROVED.length; i++) playTurn(call, i);
 }
 
-t('typed digits fill a digit field and skip speech entirely', () => {
+tKeypad('typed digits fill a digit field and skip speech entirely', () => {
   const call = startCall();
   walkTo(call, SCRIPTS.INDEX.ssn);
   call.press('4821');
@@ -483,7 +489,7 @@ t('keypad presses on a question that is not a number are ignored', () => {
   assert.strictEqual(call.twilio.ofEvent('clear').length, 0);
 });
 
-t('the hash key submits a short entry early', () => {
+tKeypad('the hash key submits a short entry early', () => {
   const call = startCall();
   walkTo(call, SCRIPTS.INDEX.account);
   call.press('5512340987#');
@@ -495,7 +501,7 @@ t('the hash key submits a short entry early', () => {
   assert.match(said, /street address/i);
 });
 
-t('the star key clears the buffer instead of submitting it', () => {
+tKeypad('the star key clears the buffer instead of submitting it', () => {
   const call = startCall();
   walkTo(call, SCRIPTS.INDEX.ssn);
   call.press('48*');
@@ -506,7 +512,7 @@ t('the star key clears the buffer instead of submitting it', () => {
   assert.match(said, /Cleared/);
 });
 
-t('the first keypress stops the bot talking', () => {
+tKeypad('the first keypress stops the bot talking', () => {
   const call = startCall();
   walkTo(call, SCRIPTS.INDEX.ssn);
   call.openai.emit('message', JSON.stringify({ type: 'response.output_audio.delta', delta: 'B' }));
@@ -515,7 +521,7 @@ t('the first keypress stops the bot talking', () => {
   assert.strictEqual(call.twilio.ofEvent('clear').length, before + 1);
 });
 
-t('an extra digit on a full field does not start a buffer on the next one', async () => {
+tKeypad('an extra digit on a full field does not start a buffer on the next one', async () => {
   // This is the one test that exercises the deaf window, so it runs with it on.
   const call = startCall({ dtmfDeafMs: 300 });
   walkTo(call, SCRIPTS.INDEX.ssn);
@@ -530,7 +536,7 @@ t('an extra digit on a full field does not start a buffer on the next one', asyn
   assert.match(said, /JPMORGAN CHASE/i, 'the routing number did not land cleanly');
 });
 
-t('while digits are being typed the keypad owns the question', () => {
+tKeypad('while digits are being typed the keypad owns the question', () => {
   // Nothing the model reports may be saved against a question with a live entry on
   // it. This was once a comparison — refuse the save only if its digits match the
   // buffer — and transcription lags the tones, so the model reported four digits while
@@ -551,7 +557,7 @@ t('while digits are being typed the keypad owns the question', () => {
   assert.match(spoken, /routing number/i, 'the completed entry did not move the form on');
 });
 
-t('star clears a half-typed entry and the caller types it again', () => {
+tKeypad('star clears a half-typed entry and the caller types it again', () => {
   // The way out for somebody who fumbles a digit. Speaking is not the way out on
   // these four questions, because they take the keypad and nothing else, so star
   // wipes the entry and the next press starts a fresh one.
@@ -824,7 +830,7 @@ t('a caller who is talking is never nudged', async () => {
   assert.ok(!/still there/.test(spoken), spoken);
 });
 
-t('typing counts as being there', async () => {
+tKeypad('typing counts as being there', async () => {
   const call = startCall({ quietNudgeMs: 120, quietEndMs: 400, goodbyeMs: 20 });
   walkTo(call, SCRIPTS.INDEX.ssn);
   for (const d of '4821') {
@@ -836,4 +842,285 @@ t('typing counts as being there', async () => {
     .map((m) => m.response?.instructions || '')
     .join(' ');
   assert.ok(!/still there/.test(spoken), 'nudged a caller who was typing');
+});
+
+// ---------- the read-back, and the four ways it was being destroyed ----------
+//
+// Every one of these passed a full suite while a clean call — no mistakes, no
+// corrections, every answer valid — could not be finished. The suite drove the
+// keypad and the model in tidy alternation, and the failures all live in the
+// overlap: the moment a keypad entry commits, the model is still talking, and its
+// own write-down of the touch tones is on its way in.
+
+// The model hears the tones and can transcribe them. That transcript used to reach
+// intake as the caller's reply to "is that right?", because the guard that refuses
+// saves inside the keypad window stood down whenever a read-back was open. Nine
+// digits of tone noise then answered a yes-or-no question: the read-back was spent,
+// the caller never got to confirm, and the same nine digits were asked for again.
+tKeypad('the tones the model writes down do not answer the read-back they caused', async () => {
+  const call = startCall({ dtmfSuppressMs: 2500 });
+  walkTo(call, SCRIPTS.INDEX.routing);
+  call.press('021000021');
+  // The model's transcription of what it just heard, arriving right behind the commit.
+  call.say('zero two one zero zero zero zero two one');
+  const result = call.lastToolResult();
+  assert.ok(!result.accepted, 'the tones were taken as an answer');
+  // The read-back is still the question on the table, so the caller's yes still lands.
+  call.say('yes');
+  const spoken = call.openai
+    .ofType('response.create')
+    .map((m) => m.response?.instructions || '')
+    .join(' ');
+  assert.ok(/account number/i.test(spoken), 'the call never reached the account number');
+});
+
+// The same, one step further on: the account number is the field the caller was
+// being sent back to type a routing number into.
+tKeypad('a clean keypad run reaches the end of the bank block', () => {
+  const call = startCall({ dtmfSuppressMs: 2500 });
+  // The line the server last asked for, played through to the end. This is what
+  // separates the model's write-down of the tones from the caller's answer: the
+  // caller cannot have replied to a line that has not been spoken yet.
+  // A read-back goes out as two lines now — the value, then the question — so this
+  // drains until nothing more is waiting behind them.
+  let n = 0;
+  const lineIsSpoken = () => {
+    for (let guard = 0; guard < 6; guard++) {
+      const asked = call.openai.ofType('response.create');
+      const before = asked.length;
+      const meta = asked[before - 1]?.response?.metadata;
+      const id = `r_${n++}`;
+      call.openai.emit('message', JSON.stringify({ type: 'response.created', response: { id, metadata: meta } }));
+      call.openai.emit('message', JSON.stringify({ type: 'response.done', response: { id } }));
+      if (call.openai.ofType('response.create').length === before) return;
+    }
+  };
+
+  walkTo(call, SCRIPTS.INDEX.ssn);
+  call.press('4821');
+  call.say('four eight two one');           // the model writing down the tones
+  lineIsSpoken();                           // "type the routing number" reaches the caller
+  call.press('021000021');
+  call.say('zero two one zero zero zero zero two one');
+  lineIsSpoken();                           // the read-back reaches the caller
+  call.say('yes');                          // and only now can they be answering it
+  lineIsSpoken();
+  call.press('5512340987#');
+  call.say('five five one two three four zero nine eight seven');
+  lineIsSpoken();
+  call.say('yes');
+  const spoken = call.openai
+    .ofType('response.create')
+    .map((m) => m.response?.instructions || '')
+    .join(' ');
+  assert.ok(/street address/i.test(spoken), `stuck in the bank block: ${spoken.slice(-160)}`);
+});
+
+// A line written while another is playing used to go into a single slot, and the
+// next line to be written overwrote it. On a keypad commit two lines are always
+// written on the same turn — the read-back, and whatever the model's own save for
+// the same digits produces — so the read-back was the one that got dropped. The
+// caller heard the second line, the server went on holding the read-back open, and
+// every digit typed after that went back into the field that was already answered.
+tKeypad('a read-back queued behind a live response is not overwritten', async () => {
+  const call = startCall({ dtmfSuppressMs: 0 });
+  walkTo(call, SCRIPTS.INDEX.routing);
+  // A response is running: server VAD opened one the moment the caller stopped talking.
+  call.openai.emit('message', JSON.stringify({ type: 'response.created', response: { id: 'r_vad' } }));
+  call.press('021000021');
+  call.say('anything at all');
+  call.openai.emit('message', JSON.stringify({ type: 'response.done', response: { id: 'r_vad' } }));
+  await sleep(20);
+  const spoken = call.openai
+    .ofType('response.create')
+    .map((m) => m.response?.instructions || '')
+    .join(' ');
+  assert.ok(/is that right/i.test(spoken), 'the read-back was dropped on the floor');
+});
+
+// Which response is the server's was decided by "the next one created", and server
+// VAD creates its own the moment the caller stops talking. When that landed in
+// between, it took the label: the model's freeform sentence was played to the caller
+// and the server's line was muted. That is where the sentences nobody wrote came
+// from — "I'm ready for the next step", "we're almost done".
+t('only the response the server asked for is played', () => {
+  const call = startCall();
+  // The model opens one on its own. No tag on it.
+  call.openai.emit(
+    'message',
+    JSON.stringify({ type: 'response.created', response: { id: 'r_model', metadata: null } }),
+  );
+  call.openai.emit(
+    'message',
+    JSON.stringify({ type: 'response.output_audio.delta', response_id: 'r_model', delta: 'BBBB' }),
+  );
+  assert.strictEqual(call.twilio.ofEvent('media').length, 0, 'the model was heard talking to itself');
+});
+
+t('the response the server asked for carries a tag and is played', () => {
+  const call = startCall();
+  const asked = call.openai.ofType('response.create')[0];
+  assert.ok(asked.response.metadata && asked.response.metadata.server_line, 'no tag on the line');
+  call.openai.emit(
+    'message',
+    JSON.stringify({
+      type: 'response.created',
+      response: { id: 'r_server', metadata: asked.response.metadata },
+    }),
+  );
+  call.openai.emit(
+    'message',
+    JSON.stringify({ type: 'response.output_audio.delta', response_id: 'r_server', delta: 'BBBB' }),
+  );
+  assert.strictEqual(call.twilio.ofEvent('media').length, 1, 'the server line was muted');
+});
+
+// Tones are not speech and have no business reaching a transcriber. Holding the mic
+// shut from the first press is what stops the write-down being generated at all,
+// rather than catching it downstream.
+tKeypad('caller audio stops reaching the model while digits are being typed', () => {
+  const call = startCall({ dtmfSuppressMs: 0 });
+  walkTo(call, SCRIPTS.INDEX.routing);
+  call.press('0210');
+  const before = call.openai.ofType('input_audio_buffer.append').length;
+  call.twilio.emit(
+    'message',
+    JSON.stringify({ event: 'media', streamSid: 'MZtest', media: { payload: 'AAAA' } }),
+  );
+  assert.strictEqual(
+    call.openai.ofType('input_audio_buffer.append').length,
+    before,
+    'the tones were forwarded to the transcriber',
+  );
+});
+
+// "Say this line word for word" is a request to a model, not a guarantee, and the
+// word it drops is the last one. On a live call the read-back came back as "Okay,
+// Joe Mama. That's j o e m a m a." and stopped: the caller heard their name spelled
+// and then nothing, said nothing back because nothing had been asked, and the server
+// sat holding a yes-or-no question open behind the silence.
+t('a read-back that comes back without its question gets the question asked', () => {
+  const call = startCall();
+  call.say('Joe');
+  call.say('Mama');
+  // The server asked for the read-back. The model says the first half and stops.
+  const asked = call.openai.ofType('response.create').slice(-1)[0];
+  assert.match(asked.response.instructions, /Is that right\?/i, 'no read-back was asked for');
+  const meta = asked.response.metadata;
+  call.openai.emit('message', JSON.stringify({ type: 'response.created', response: { id: 'r_short', metadata: meta } }));
+  call.openai.emit(
+    'message',
+    JSON.stringify({
+      type: 'response.output_audio_transcript.done',
+      response_id: 'r_short',
+      transcript: "Okay, Joe Mama. That's j o e m a m a.",
+    }),
+  );
+  const after = call.openai.ofType('response.create').slice(-1)[0];
+  assert.match(after.response.instructions, /Is that right\?/i, 'the missing question was never asked');
+});
+
+t('a read-back that was said in full is not asked twice', () => {
+  const call = startCall();
+  call.say('Joe');
+  call.say('Mama');
+  const asked = call.openai.ofType('response.create');
+  const meta = asked[asked.length - 1].response.metadata;
+  const before = asked.length;
+  call.openai.emit('message', JSON.stringify({ type: 'response.created', response: { id: 'r_full', metadata: meta } }));
+  call.openai.emit(
+    'message',
+    JSON.stringify({
+      type: 'response.output_audio_transcript.done',
+      response_id: 'r_full',
+      transcript: "Okay, Joe Mama. That's j o e m a m a. Is that right?",
+    }),
+  );
+  assert.strictEqual(call.openai.ofType('response.create').length, before, 'asked the question a second time');
+});
+
+// The read-back's question is sent as a line of its own. A model asked to say a long
+// line word for word drops the last words, and here the last words are the entire
+// point: "Okay, Joe Mama. That's j o e m a m a." with no question after it leaves the
+// caller with nothing to answer and the server waiting for an answer.
+t('the read-back question goes out as its own line', () => {
+  const call = startCall();
+  call.say('Joe');
+  call.say('Mama');
+  const asked = call.openai.ofType('response.create').map((m) => m.response.instructions);
+  const question = asked[asked.length - 1];
+  const body = asked[asked.length - 2];
+  assert.match(question, /LINE: Is that right\?$/m, `last line was: ${question.slice(-80)}`);
+  assert.match(body, /j o e m a m a/i, 'the spelling was not sent');
+  assert.doesNotMatch(body, /is that right/i, 'the question is still riding on the long line');
+});
+
+// The same words filed twice as the form moves under them. On a live call "four seven
+// three" was accepted as the apartment number and then written into the city, and the
+// application went out with a city called 473.
+t('an answer filed twice does not land in the next field too', () => {
+  const call = startCall();
+  walkTo(call, SCRIPTS.INDEX.street_2 !== undefined ? SCRIPTS.INDEX.street_2 : SCRIPTS.INDEX.city);
+  call.say('473');
+  const before = call.lastToolResult();
+  assert.ok(before.accepted, 'the apartment number was refused');
+  call.say('473');
+  const after = call.lastToolResult();
+  assert.strictEqual(after.accepted, false, 'the repeat was written into the next field');
+});
+
+// Repeating yourself is normal. Two knockout questions in a row are both answered
+// "no" and both of those are real answers.
+t('the same word twice is still two answers when it carries no digits', () => {
+  const call = startCall();
+  walkTo(call, SCRIPTS.INDEX.deployed_military);
+  call.say('no');
+  const first = call.lastToolResult();
+  call.say('no');
+  const second = call.lastToolResult();
+  assert.ok(first.accepted && second.accepted, 'an honest repeat was refused');
+});
+
+// ---------- the model answering its own question ----------
+//
+// On a live call the bot asked "Okay, Joe Mama. That's j o e m a m a. Is that right?"
+// and then filed save_answer("Yes, that's right.") and moved on to the email address.
+// The caller had not made a sound; there was no transcript in the log because there
+// was nothing to transcribe. A model handed a turn produces a plausible continuation,
+// and after a yes-or-no question the plausible continuation is a yes.
+const spoke = (call) =>
+  call.openai.emit('message', JSON.stringify({ type: 'input_audio_buffer.speech_stopped' }));
+
+t('an answer with no caller turn behind it is refused', () => {
+  const call = startCall();
+  spoke(call);
+  call.say('Joe');
+  assert.ok(call.lastToolResult().accepted, 'a real answer was refused');
+  // Nothing said, and the model files one anyway.
+  call.saysNothingButModelSaves('Smith');
+  const r = call.lastToolResult();
+  assert.strictEqual(r.accepted, false, 'the model answered for the caller');
+  assert.ok(r.silent, 'the refusal talked over the question already asked');
+});
+
+t('one caller turn does not pay for two answers', () => {
+  const call = startCall();
+  spoke(call);
+  call.say('Joe');
+  // Same turn, second save. The caller said one thing.
+  call.saysNothingButModelSaves('Smith');
+  assert.strictEqual(call.lastToolResult().accepted, false);
+  // They speak again, and it goes through.
+  spoke(call);
+  call.say('Smith');
+  assert.ok(call.lastToolResult().accepted, 'a fresh turn was refused');
+});
+
+t('a call that never reports speech detection still works', () => {
+  // The fake sockets in most tests drive tool calls with no audio events at all, and
+  // so does the carrier before the first word. With nothing ever detected the check
+  // stands down rather than refusing every answer on the call.
+  const call = startCall();
+  call.say('Joe');
+  assert.ok(call.lastToolResult().accepted);
 });
