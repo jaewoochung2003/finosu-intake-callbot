@@ -38,14 +38,19 @@ const SPEECH_URL = 'https://api.openai.com/v1/audio/speech';
 // TTS_MODEL=gpt-4o-mini-tts puts it back with its style instructions attached.
 const TTS_MODEL = process.env.TTS_MODEL || 'tts-1';
 const TTS_VOICE = process.env.TTS_VOICE || 'alloy';
-// Pace. tts-1 and tts-1-hd apply this; the gpt-4o voices do not, dependably.
+// Pace, and there are two of them, because the two kinds of line want opposite
+// things. An ordinary question is a sentence and wants to be over with; a read-back
+// is a string of single characters the caller is checking one at a time against
+// something in their hand, and at conversational pace it goes past faster than they
+// can follow. One number for both made the greeting drag and the spelling a blur.
 //
-// 1.0 is the model's natural pace and came back a shade brisk for somebody being
-// asked to find a bank statement, so it sits a little under. It is worth knowing that
-// one request is not a measurement: generation varies enough that 0.95 can come back
-// longer than 1.0 on a single sample. The trend across a few tenths is real, the gap
-// between two neighbouring values is not. Turn TTS_SPEED in .env by 0.05 at a time.
-const TTS_SPEED = Number(process.env.TTS_SPEED || 0.9);
+// Measure on a long line, not a short one. Short samples are dominated by how much
+// generation varies between requests: 0.9, 1.0 and 1.05 all came back within 40 ms of
+// each other on a three word question, which reads as "speed does nothing", while the
+// same three values on the greeting came back 12.1, 10.7 and 9.6 seconds.
+const TTS_SPEED_PLAIN = Number(process.env.TTS_SPEED_PLAIN || process.env.TTS_SPEED || 1.05);
+const TTS_SPEED_SPELLED = Number(process.env.TTS_SPEED_SPELLED || 0.75);
+const speedFor = (text) => (SPELLED_OUT.test(text) ? TTS_SPEED_SPELLED : TTS_SPEED_PLAIN);
 // Which models take a free-text delivery note. The older ones reject the field.
 const TAKES_INSTRUCTIONS = /^gpt-/.test(TTS_MODEL);
 
@@ -200,7 +205,7 @@ function request(text, { apiKey = process.env.OPENAI_API_KEY, signal } = {}) {
       voice: TTS_VOICE,
       input: text,
       ...(TAKES_INSTRUCTIONS ? { instructions: styleFor(text) } : {}),
-      ...(TTS_SPEED !== 1 ? { speed: TTS_SPEED } : {}),
+      ...(TAKES_INSTRUCTIONS ? {} : { speed: speedFor(text) }),
       // Raw samples. Every other format the endpoint offers is a container that would
       // have to be decoded here first.
       response_format: 'pcm',
@@ -267,8 +272,11 @@ async function speechFrames(text, opts = {}) {
 module.exports = {
   makeResampler,
   styleFor,
+  speedFor,
   TTS_STYLE_PLAIN,
   TTS_STYLE_SPELLED,
+  TTS_SPEED_PLAIN,
+  TTS_SPEED_SPELLED,
   speechStream,
   speechFrames,
   pcm24kToMulaw8k,

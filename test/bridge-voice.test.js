@@ -355,3 +355,15 @@ t('a spelled-out line asks for a different delivery than a plain one', () => {
   assert.strictEqual(voice.styleFor('Is that a yes?'), voice.TTS_STYLE_PLAIN);
   assert.strictEqual(voice.styleFor('Got it, 473. And the city?'), voice.TTS_STYLE_PLAIN);
 });
+
+// The two kinds of line want opposite pacing. An ordinary question is a sentence and
+// wants to be over with; a read-back is single characters the caller is checking one
+// at a time against something in their hand, and at conversational pace it is a blur.
+t('a spelled-out line is spoken slower than a plain one', () => {
+  assert.ok(
+    voice.speedFor("Okay, Joe Mama. That's j o e m a m a. Is that right?") < voice.speedFor('And the city?'),
+    'the read-back is not slowed down',
+  );
+  assert.strictEqual(voice.speedFor('Okay, 0 2 1 0 0 0 0 2 1. Is that right?'), voice.TTS_SPEED_SPELLED);
+  assert.strictEqual(voice.speedFor('Got it, 473. And the city?'), voice.TTS_SPEED_PLAIN);
+});
