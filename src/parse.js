@@ -325,7 +325,13 @@ const DONT_KNOW =
 // Present tense only: the knockout questions ask "right now", so a past-tense answer
 // ("I was deployed years ago", "I did two tours but I'm out now") is a NO, not a yes.
 // "i was" and "i did" are dropped here and caught by the past-experience guard below.
-const AFFIRMATIVE_PHRASE = /\b(i do|i am|i m|i have|i is|that i am|we do|yes i (do|am|have))\b/;
+// An auxiliary verb answers a yes/no question only when it stands alone: "I am."
+// followed by nothing is a yes; "I am a civilian" is a description, and reading its
+// leading "I am" as an affirmative declined a civilian under the deployed-military
+// rule. Anchored to the end of the utterance, with room for a trailing filler, so the
+// bare answer still confirms and a sentence has to be read on its own words.
+const AFFIRMATIVE_PHRASE =
+  /\b(i do|i am|i m|i have|i is|that i am|we do|yes i (do|am|have))\b\s*(too|as well|sir|maam|though|yeah|yes)?\s*$/;
 
 // What people actually say to a read-back. "Right" cannot go in the YES set on its
 // own, because it is also filler and the knockout questions themselves say "right
@@ -352,6 +358,17 @@ function parseYesNo(text) {
 
   if (REFUSAL.test(joined)) return null;
   if (DONT_KNOW.test(joined)) return null;
+
+  // An intensifier is not an answer. "Absolutely", "definitely" and "certainly" sit in
+  // the YES set because they are a yes on their own, but they are also the first word
+  // of the most emphatic possible NO. The leading-word scan reached them before the
+  // negation check below, so "absolutely not" was recorded as yes and the strongest
+  // no a caller can give declined them for the thing they were denying.
+  //
+  // Checked here rather than removed from YES, so a bare "absolutely" still confirms.
+  if (/\b(absolutely|definitely|certainly|surely|totally|positively|for sure)\s+(not|nt)\b/.test(joined)) {
+    return false;
+  }
 
   // A leading "no" or "yes" wins over anything later in the sentence:
   // "no, I'm not on any assistance" is a no.
@@ -452,6 +469,21 @@ function saysStop(text) {
   ) {
     return false;
   }
+  // "Done" with the question in front of them, not with the call. "I am done with
+  // this question" and "okay I am finished with that one" both matched the
+  // done/finished pattern and hung up on an applicant who was telling the bot to move
+  // on. A stated object after it says which one they meant.
+  if (/\b(done|finished|good|all set|set)\s+(with|on)\s+(this|that|the)\b/.test(raw)) return false;
+  // Asking whether a person is available afterwards is not asking for one now. "Can I
+  // talk to someone about this later" matched the transfer pattern and ended the
+  // application. A stop request is about this call, right now.
+  if (
+    /\b(speak|talk)\b/.test(raw) &&
+    /\b(later|tomorrow|afterwards|after this|after we|another day|once we are done|when we finish|at some point)\b/.test(raw) &&
+    !/\b(transfer|connect|put me|get me|right now|now please)\b/.test(raw)
+  ) {
+    return false;
+  }
   return STOP_REQUEST.some((re) => re.test(raw));
 }
 
@@ -524,6 +556,10 @@ function parseAmount(text) {
     if (numeric[2]) n *= 1000;
     // "1.5k" and "2 k" are thousands; a bare "2" next to "thousand" is handled below
     if (!numeric[2] && /\bthousand\b/.test(raw) && n < 100) n *= 1000;
+    // The spoken-word path already read "thirty five hundred" as 3,500, but the digit
+    // path had no rule for "hundred" at all, so "35 hundred" came out as 35 dollars a
+    // month and declined the caller. Same number, said with a digit instead of a word.
+    if (!numeric[2] && !/\bthousand\b/.test(raw) && /\bhundred\b/.test(raw) && n < 100) n *= 100;
     if (/\bmillion\b/.test(raw) && n < 1000000) n *= 1000000;
     if (/\bbillion\b/.test(raw) && n < 1000000000) n *= 1000000000;
     if (n > 0) return n;

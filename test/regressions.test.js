@@ -573,6 +573,51 @@ t('regression: correcting the surname reaches the printed name', () => {
   assert.strictEqual(s.record.name, 'Gabriel Chung');
 });
 
+t('regression: an emphatic no is a no', () => {
+  // "absolutely", "definitely" and "certainly" are in the YES set because each is a
+  // yes on its own, and the leading-word scan reached them before the negation check.
+  // So the strongest no a caller can give was recorded as yes, and an applicant was
+  // declined for the thing they were denying.
+  for (const said of ['absolutely not', 'definitely not', 'certainly not', 'surely not', 'positively not']) {
+    assert.strictEqual(P.parseYesNo(said), false, `"${said}" was read as a yes`);
+  }
+  for (const said of ['absolutely', 'definitely', 'certainly', 'yes']) {
+    assert.strictEqual(P.parseYesNo(said), true, `"${said}" stopped confirming`);
+  }
+});
+
+t('regression: an auxiliary verb only answers when it stands alone', () => {
+  // "I am a civilian" opens with "I am" and was read as an affirmative, which
+  // declined a civilian under the deployed-military rule.
+  assert.strictEqual(P.parseYesNo('I am a civilian'), null);
+  assert.strictEqual(P.parseYesNo('I am a student'), null);
+  assert.strictEqual(P.parseYesNo('I am'), true);
+  assert.strictEqual(P.parseYesNo('I do'), true);
+  assert.strictEqual(P.parseYesNo('yes I am'), true);
+});
+
+t('regression: a digit followed by "hundred" is hundreds', () => {
+  // The spoken-word path read "thirty five hundred" as 3,500; the digit path had no
+  // rule for "hundred" and recorded 35 dollars a month.
+  assert.strictEqual(P.parseAmount('35 hundred'), 3500);
+  assert.strictEqual(P.parseAmount('35 hundred a month'), 3500);
+  assert.strictEqual(P.parseAmount('thirty five hundred'), 3500);
+  assert.strictEqual(P.parseAmount('2 thousand'), 2000);
+  assert.strictEqual(P.parseAmount('2500'), 2500);
+});
+
+t('regression: being done with a question does not end the call', () => {
+  // Both of these hung up on an applicant who was telling the bot to move on, and the
+  // third ended the application over a question about reaching a human afterwards.
+  assert.strictEqual(P.saysStop('I am done with this question'), false);
+  assert.strictEqual(P.saysStop('okay I am finished with that one'), false);
+  assert.strictEqual(P.saysStop('can I talk to someone about this later'), false);
+  // A real request to stop still stops.
+  for (const said of ['I want to hang up', 'let me speak to a person', 'I am done', 'call me back']) {
+    assert.strictEqual(P.saysStop(said), true, `"${said}" stopped ending the call`);
+  }
+});
+
 t('regression: a military dependent is declined, a veteran is not', () => {
   // The question asks two things at once and callers answer the pair in one sentence.
   // The plain yes/no reader took the leading "no" and approved the dependent.
