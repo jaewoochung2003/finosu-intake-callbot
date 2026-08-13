@@ -146,7 +146,23 @@ function earSession(model) {
           // decides badly: a caller saying his own surname got it back in Cyrillic,
           // and a one word "yes" came back as Turkish and was refused as an answer.
           // Nothing on this call is in another language, so there is nothing to detect.
-          transcription: { model: 'whisper-1', language: process.env.ASR_LANGUAGE || 'en' },
+          //
+          // The prompt is the words it should expect. A transcriber with no idea what
+          // the call is about picks the commoner word every time, and a one word
+          // answer gives it nothing to go on: a caller answering "student" got
+          // "students" back, three times, and "students" is the commoner word in
+          // ordinary English. The list is the closed answers this form asks for, so
+          // the one place a single word decides a field is the place it has help.
+          transcription: {
+            model: 'whisper-1',
+            language: process.env.ASR_LANGUAGE || 'en',
+            prompt:
+              'A loan application taken over the phone. Expect these answers: employed, ' +
+              'self-employed, unemployed, retired, student, checking, savings, weekly, ' +
+              'biweekly, every two weeks, twice a month, monthly, yes, no. Also names, ' +
+              'email addresses, street addresses, dollar amounts, dates of birth, and ' +
+              'routing and account numbers read out as digits.',
+          },
         },
       },
       tools: [],
