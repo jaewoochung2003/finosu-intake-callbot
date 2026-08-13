@@ -304,6 +304,29 @@ t('the fields nothing can check are read back and wait for a yes', () => {
   assert.match(lastToolResult().say_next, /Spell out the whole address/);
 });
 
+t('only the line the server asked for is played to the caller', () => {
+  // Server VAD creates a response of its own every time the caller stops talking, and
+  // the model both calls save_answer in it and says whatever it likes, since nobody
+  // has handed it a line yet. Playing that alongside the server's line put two bot
+  // turns back to back and out of order, and is where the invented bank lookup and
+  // the line about seeing a document came from.
+  const { twilio, openai } = startCall();
+  // The greeting: speak() asked for it, so this response is ours.
+  openai.emit('message', JSON.stringify({ type: 'response.created', response: { id: 'resp_ours' } }));
+  openai.emit(
+    'message',
+    JSON.stringify({ type: 'response.output_audio.delta', response_id: 'resp_ours', delta: 'AAAA' }),
+  );
+  assert.strictEqual(twilio.ofEvent('media').length, 1, 'the server line was not played');
+
+  // The model talking on its own initiative, in a response nobody asked for.
+  openai.emit(
+    'message',
+    JSON.stringify({ type: 'response.output_audio.delta', response_id: 'resp_theirs', delta: 'BBBB' }),
+  );
+  assert.strictEqual(twilio.ofEvent('media').length, 1, 'unprompted model audio reached the caller');
+});
+
 t('an unknown tool name does not throw', () => {
   const { openai } = startCall();
   assert.doesNotThrow(() =>

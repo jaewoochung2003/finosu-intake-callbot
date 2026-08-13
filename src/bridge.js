@@ -147,6 +147,11 @@ function handleCall(twilioWs, opts = {}) {
   let nudged = false;
   const handledCalls = new Set();
   let markQueue = [];
+  // Response ids the server asked for, and whether the next one to be created is
+  // ours. Everything else the model generates is heard by nobody.
+  const instructed = new Set();
+  let awaitingInstructed = false;
+  let uninstructedFrames = 0;
 
   const openaiWs = openWebSocket(
     `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(OPENAI_MODEL)}`,
@@ -166,6 +171,7 @@ function handleCall(twilioWs, opts = {}) {
     // Cancelling when nothing is generating is an error back from the API on every
     // turn, which buries the log lines that matter under noise.
     if (cancelFirst && responseActive) toOpenai({ type: 'response.cancel' });
+    awaitingInstructed = true;
     // Word for word, not "in your own voice." Every line here is already written to
     // be spoken, and the paraphrase latitude let the model drop the "Is that right?"
     // off a read-back and turn "spell your first name" into "your last name". The
@@ -211,11 +217,32 @@ function handleCall(twilioWs, opts = {}) {
         responseActive = true;
         speakingSince = Date.now();
         lastActivity = Date.now();
+        // Two responses happen on every caller turn, and only one of them is ours.
+        // Server VAD creates a response automatically when the caller stops talking,
+        // and the model both calls save_answer in it AND says whatever it feels like,
+        // because nobody has given it a line yet. Then the tool result comes back and
+        // speak() creates a second response carrying the line the server actually
+        // wrote. Forwarding both is what put two bot turns back to back, out of order,
+        // the second one contradicting the first — and it is where the invented bank
+        // lookup and the line about seeing a document came from. The tool call in the
+        // automatic response is load-bearing, so it cannot be switched off; its audio
+        // is simply not played.
+        if (awaitingInstructed && msg.response && msg.response.id) {
+          instructed.add(msg.response.id);
+          awaitingInstructed = false;
+        }
         break;
 
       // Audio back to the caller. The payload is already u-law base64.
       case 'response.output_audio.delta':
       case 'response.audio.delta':
+        // Only audio from a response the server asked for reaches the caller. An event
+        // carrying no response_id is passed through, so the fake sockets in the tests
+        // still drive this path.
+        if (msg.response_id && instructed.size && !instructed.has(msg.response_id)) {
+          uninstructedFrames += 1;
+          break;
+        }
         if (msg.delta && streamSid && !typing) {
           lastActivity = Date.now();
           toTwilio({ event: 'media', streamSid, media: { payload: msg.delta } });
@@ -313,6 +340,11 @@ function handleCall(twilioWs, opts = {}) {
 
       case 'response.done': {
         responseActive = false;
+        if (msg.response && msg.response.id) instructed.delete(msg.response.id);
+        if (uninstructedFrames) {
+          log(session.callSid, 'muted', uninstructedFrames, 'frames the model spoke unprompted');
+          uninstructedFrames = 0;
+        }
         for (const item of msg.response?.output || []) {
           if (item.type === 'function_call') onToolCall(item.call_id, item.name, item.arguments);
         }
