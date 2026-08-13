@@ -88,7 +88,19 @@ const EMPLOYMENT_SYNONYMS = {
   'freelance': 'Self-employed',
   'contractor': 'Self-employed',
   '1099': 'Self-employed',
+  // Every negative answer this question accepts is listed here by hand. parseEnum
+  // reads the table before it refuses negatives, so these land and anything else
+  // carrying a "not" is re-asked with the five choices named.
   'not working': 'Unemployed',
+  'not employed': 'Unemployed',
+  'no longer employed': 'Unemployed',
+  'not currently employed': 'Unemployed',
+  'dont have a job': 'Unemployed',
+  'do not have a job': 'Unemployed',
+  'dont work': 'Unemployed',
+  'do not work': 'Unemployed',
+  'out of work': 'Unemployed',
+  'unemployment': 'Unemployed',
   'no job': 'Unemployed',
   'laid off': 'Unemployed',
   'between jobs': 'Unemployed',

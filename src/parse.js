@@ -869,32 +869,32 @@ function parseEnum(text, options, synonyms = {}) {
   if (!raw) return null;
 
   const esc = (p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-  // A word the caller ruled out is not the word they chose. "I'm not employed" named
-  // Employed and nothing else, so the plain scan recorded Employed and the
-  // NOT_EMPLOYED knockout never fired; "not monthly, every Friday" recorded Monthly
-  // and declined a weekly earner on a converted figure they never gave.
-  //
-  // Bare "no" is deliberately not a negator here. "No, checking" and "no, monthly" are
-  // ordinary answers where the no belongs to something else, and treating that leading
-  // no as a negation would re-ask a caller who answered the question properly. Only
-  // the not/n't family and "never" rule an option out.
-  const NEGATOR = /\b(not|nt|cannot|isnt|arent|aint|dont|doesnt|didnt|wasnt|werent|never)\b/;
-  const negated = (phrase) => {
-    // Up to two words of lead-in, so "I am not employed" is caught and "I am employed"
-    // is not. A negator inside the phrase itself ("not working", a real synonym for
-    // Unemployed) never appears in the window, so those keep working.
-    const m = raw.match(new RegExp(`((?:\\b[a-z0-9]+\\b ){0,2})\\b${esc(phrase)}\\b`));
-    return !!m && NEGATOR.test(m[1]);
-  };
-  const hasWord = (phrase) => new RegExp(`\\b${esc(phrase)}\\b`).test(raw) && !negated(phrase);
+  const hasWord = (phrase) => new RegExp(`\\b${esc(phrase)}\\b`).test(raw);
 
   // Synonyms first, because a multi-word synonym often contains a bare option word:
   // "bi weekly" holds "weekly", "semi monthly" holds "monthly", "share draft" is a
   // checking account. Read as the contained option they recorded the wrong value; as
-  // a synonym they map correctly.
+  // a synonym they map correctly. The list is also where every negative answer this
+  // accepts is written down, one phrase at a time: "not working" means Unemployed
+  // because the table says so, not because anything here reasons about negation.
   for (const [phrase, option] of Object.entries(synonyms)) {
     if (hasWord(phrase)) return option;
+  }
+
+  // Past the synonym table, a negative is not an answer to a closed question.
+  //
+  // There was a rule here that read a negation and worked out which option it ruled
+  // out, using a two-word window before the option word. Every version of it was wrong
+  // somewhere: "I'm not employed" was caught, "I am no longer employed" was not and
+  // recorded Employed, and "I do not have a savings account" recorded Savings and
+  // declined a checking-only caller. Widening the window trades one wrong answer for
+  // another, because the caller is not choosing an option in either sentence.
+  //
+  // So a closed question takes one of its own answers and nothing else. Anything
+  // carrying a negative is re-asked with the choices named, which costs a turn and
+  // cannot record the opposite of what the caller said.
+  if (/\b(not|nt|no|never|cannot|dont|doesnt|didnt|isnt|arent|aint|wasnt|werent|neither|nor)\b/.test(raw)) {
+    return null;
   }
 
   // Options actually named, keeping only the most specific: "self employed" contains
