@@ -559,9 +559,40 @@ t('regression: correcting the surname reaches the printed name', () => {
   const s = intake.startSession({ callSid: 'reg' });
   intake.submit(s, 'Gabriel');
   intake.submit(s, 'Kim');
-  intake.submit(s, 'Chung'); // correction at the read-back, no leading "no"
+  // A marked correction at the read-back. This used to be a BARE "Chung", because
+  // the read-back took any words as the new value. That is what let "that's right",
+  // "bingo" and "aye" become surnames, so the bare form now rewinds to the spelling
+  // question instead. The cue is what makes it a correction; the derive step running
+  // on that path is what this regression guards.
+  intake.submit(s, 'actually it should be Chung');
   intake.submit(s, 'yes');
   assert.strictEqual(s.record.name, 'Gabriel Chung');
+});
+
+t('a read-back answer that is not a yes never becomes the name', () => {
+  for (const said of ["that's right", 'uh huh', 'bingo', 'aye', 'right on', 'say that again', 'Joe']) {
+    const s = intake.startSession({ callSid: 'reg' });
+    intake.submit(s, 'Mike');
+    intake.submit(s, 'Hawk');
+    intake.submit(s, said);
+    assert.notStrictEqual(s.record.last_name, said, `"${said}" was written in as the surname`);
+    if (s.record.last_name !== undefined) assert.strictEqual(s.record.last_name, 'Hawk');
+  }
+});
+
+t('redo_previous at the name read-back rewinds to the FIRST name, not the last', () => {
+  // The caller hears "Okay, Mike Hawk, is that right?" and the half they want to fix
+  // is the first name. Stepping back one field re-asked the surname and left them no
+  // way to reach it. The "no" answer already rewound correctly; this path did not.
+  const s = intake.startSession({ callSid: 'reg' });
+  intake.submit(s, 'Mike');
+  intake.submit(s, 'Hawk');
+  const back = intake.undoLast(s);
+  assert.match(back.say, /first name/i);
+  assert.strictEqual(intake.currentField(s).key, 'first_name');
+  assert.strictEqual(s.record.first_name, undefined);
+  assert.strictEqual(s.record.last_name, undefined);
+  assert.strictEqual(s.record.name, undefined);
 });
 
 t('regression: a correction wearing a "yeah" is a correction, not a confirm', () => {

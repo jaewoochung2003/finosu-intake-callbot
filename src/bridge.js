@@ -325,7 +325,18 @@ function handleCall(twilioWs, opts = {}) {
         result = toResult(intake.submit(session, String(args.answer ?? '')));
       }
     } else if (name === 'redo_previous') {
-      const back = intake.undoLast(session);
+      // A read-back is already a question about the value, so the server owns every
+      // answer to it and the model has nothing to decide. On a live call the caller
+      // answered "Okay, Mike Hawk, is that right?" with "Joe", meaning his first name
+      // was wrong. The model read that as a redo and called this tool, which carries
+      // no arguments, so the word "Joe" was destroyed before the server saw it and
+      // the bot went on to re-ask the LAST name. Route it back through the normal
+      // turn while a read-back is open, so the caller's words survive and the
+      // confirmation logic decides what they mean.
+      const heard = String(args.heard || '').trim();
+      const back = session.pending && heard
+        ? intake.submit(session, heard)
+        : intake.undoLast(session);
       result = back
         ? toResult(back)
         : { accepted: false, problem: 'nothing to go back to', say_next: intake.nextPrompt(session) };

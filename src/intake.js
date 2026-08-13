@@ -308,8 +308,17 @@ function resolveConfirmation(session, said) {
   // If the utterance carries a correction cue AND validates to a value that differs
   // from the pending one, it is a correction, not a confirmation. Gated on the cue
   // words (not just length) so a plain "yeah that is right, thanks" still confirms.
+  // Nothing made only of conversation words can be the answer to "is that right",
+  // whichever path below would otherwise take it. A read-back has three ways out —
+  // yes, no, or the corrected value — so an utterance the yes/no reader does not
+  // recognize used to be written into the field as the correction, and the name
+  // validator accepts almost any words. That is how "that's right" became a surname.
+  // Adding phrases to the yes list only covers the phrases on the list; this covers
+  // everything not on it, by making the failure a re-ask instead of an overwrite.
+  const cannotBeAValue = P.isConversational(said);
+
   const hasCorrectionCue = /\b(actually|wait|no|not|its|it is|should be|meant|make it|change)\b/i.test(said);
-  if (answer !== false && hasCorrectionCue) {
+  if (answer !== false && hasCorrectionCue && !cannotBeAValue) {
     const early = field.validate(said, session.record);
     if (early.ok && early.value !== pending.value) return acceptCorrection(session, field, said, early);
   }
@@ -319,27 +328,7 @@ function resolveConfirmation(session, said) {
     return step(session, { accepted: true });
   }
 
-  if (answer === false) {
-    session.pending = null;
-    // One read-back can cover more than one question: the name is asked in two
-    // halves and confirmed as a whole. Clearing only the half that was confirmed
-    // sent the re-spelled whole name into the last name field, and the read-back
-    // came back "Jae Woo Jaewoo Chung".
-    const covers = field.confirmCovers || [field.key];
-    for (const key of covers) {
-      delete session.record[key];
-      clearDerived(session, key);
-    }
-    if (field.derive) for (const key of Object.keys(field.derive('', {}))) delete session.record[key];
-    session.index = FIELDS.findIndex((f) => f.key === covers[0]);
-    session.attempts = 0;
-    session.askedAt = Date.now();
-    return {
-      accepted: false,
-      say: field.respell || `Sorry about that. ${currentField(session).ask}`,
-      done: false,
-    };
-  }
+  if (answer === false) return rejectReadBack(session, field);
 
   // "What?" / "say that again" is a request to repeat, not a failure to confirm.
   // Re-read the value without counting it toward giving up, so a caller on a bad
@@ -361,8 +350,26 @@ function resolveConfirmation(session, said) {
   }
 
   // Not a yes or a no. Take it as the corrected answer if it reads as one.
-  const retry = field.validate(said, session.record);
-  if (retry.ok && retry.value !== pending.value) return acceptCorrection(session, field, said, retry);
+  //
+  // A field whose validator accepts any words (the name) is excluded here: the
+  // question on the table is "is that right", so an answer to it only becomes a new
+  // value when the caller said "no" above or marked it as a correction in the block
+  // at the top. Without that, the answer to a yes/no question was being written into
+  // the field the question was about, and no list of agreement phrases can close
+  // that — "bingo", "aye" and "right on" all validated as surnames.
+  if (!cannotBeAValue && !field.anyWordsValidate) {
+    const retry = field.validate(said, session.record);
+    if (retry.ok && retry.value !== pending.value) return acceptCorrection(session, field, said, retry);
+  }
+
+  // On a two-part read-back a bare name says nothing about WHICH half is wrong. A
+  // caller who hears "Okay, Mike Hawk, is that right?" and answers "Joe" means his
+  // first name, and one who answers "Hawkins" means his surname, and the words are
+  // identical in shape. Guessing put it in the last name either way. So an answer
+  // here that is not a yes, not a no and not a request to repeat is treated as a no:
+  // both halves are cleared and the caller is asked to spell from the first name,
+  // which is the one path that reaches either half. Nothing is written on a guess.
+  if (field.anyWordsValidate && !cannotBeAValue) return rejectReadBack(session, field);
 
   pending.tries += 1;
   if (pending.tries >= 2) {
@@ -387,6 +394,30 @@ function resolveConfirmation(session, said) {
   return {
     accepted: false,
     say: `Sorry, was that a yes or a no? ${confirmLine(field, pending.value, session.record)} Is that right?`,
+    done: false,
+  };
+}
+
+// The caller did not accept the value that was read back. One read-back can cover
+// more than one question: the name is asked in two halves and confirmed as a whole,
+// so clearing only the half that was confirmed sent the re-spelled whole name into
+// the last name field and the read-back came back "Jae Woo Jaewoo Chung". Every
+// covered field goes, along with anything derived from it, and the call rewinds to
+// the first of them, which is the only question from which both halves are reachable.
+function rejectReadBack(session, field) {
+  session.pending = null;
+  const covers = field.confirmCovers || [field.key];
+  for (const key of covers) {
+    delete session.record[key];
+    clearDerived(session, key);
+  }
+  if (field.derive) for (const key of Object.keys(field.derive('', {}))) delete session.record[key];
+  session.index = FIELDS.findIndex((f) => f.key === covers[0]);
+  session.attempts = 0;
+  session.askedAt = Date.now();
+  return {
+    accepted: false,
+    say: field.respell || `Sorry about that. ${currentField(session).ask}`,
     done: false,
   };
 }
@@ -478,7 +509,46 @@ function undoLast(session) {
   // again, not the one before it: the value is captured but unconfirmed, and the
   // form has not moved on yet.
   const wasPending = session.pending !== null;
+  const pendingKey = session.pending ? session.pending.key : null;
   session.pending = null;
+
+  // One read-back can cover more than one question. The name is asked in two halves
+  // and confirmed as a whole, so "that's wrong" said to "Okay, Mike Hawk, is that
+  // right?" is about the whole name and the caller has no way to say which half.
+  // Stepping back one field re-asked only the surname, so a caller whose FIRST name
+  // was misheard could not reach it at all: on a live call "no" came through the
+  // transcriber as "Joe", the model read it as a redo, and the bot answered "and the
+  // last name once more?" over a first name the caller was trying to fix.
+  //
+  // The "no" answer at the read-back already rewound to the first covered field.
+  // This path never learned the same thing, which is why the fix looked done.
+  if (wasPending && pendingKey) {
+    const confirmed = FIELDS.find((f) => f.key === pendingKey);
+    const covers = confirmed && confirmed.confirmCovers;
+    if (covers && covers.length > 1) {
+      for (const key of covers) {
+        const had = session.record[key];
+        if (had !== undefined) {
+          session.corrections.push({
+            field: key,
+            previous: confirmed.sensitive ? V.maskAccount(String(had)) : had,
+            at: new Date().toISOString(),
+          });
+        }
+        delete session.record[key];
+        clearDerived(session, key);
+        session.unresolved = session.unresolved.filter((k) => k !== key);
+      }
+      session.index = FIELDS.findIndex((f) => f.key === covers[0]);
+      session.attempts = 0;
+      session.askedAt = Date.now();
+      return {
+        accepted: true,
+        say: confirmed.respell || `No problem. ${currentField(session).ask}`,
+        done: false,
+      };
+    }
+  }
   // Walk back to the last question that was actually put to the caller.
   //
   // "Put to the caller" is session.capture, not session.record. Two things live in

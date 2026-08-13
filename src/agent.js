@@ -39,7 +39,13 @@ HOW THE CALL WORKS
   one at a time — ask the question, and stop there. The next thing the caller says
   is their yes, their no, or their correction, and the server reads it as exactly
   that, so never roll into the next question on the same turn.
-- If the caller says something you just took down was wrong, call redo_previous.
+- If the caller says something you just took down was wrong, call redo_previous, and
+  always put their exact words in "heard".
+- While a read-back is open — you have just asked "is that right?" and are waiting —
+  call save_answer with whatever the caller said and nothing else. Yes, no, a
+  correction, a question, a noise: all of it goes to save_answer word for word. Do
+  not decide what it meant and do not reach for another tool. The server knows which
+  question is open and which fields the read-back covered; you do not.
 - If the caller hangs up on the conversation, refuses to continue, or asks to speak
   to a person, call end_call with a short reason.
 
@@ -95,8 +101,20 @@ const TOOLS = [
     type: 'function',
     name: 'redo_previous',
     description:
-      'The caller says the answer you just recorded was wrong. Steps back one question and asks it again.',
-    parameters: { type: 'object', properties: {}, required: [] },
+      'The caller says the answer you just recorded was wrong. Steps back one question and asks it again. ' +
+      'Always pass what the caller actually said in "heard", word for word, even if it is only "no" — ' +
+      'the server needs their words to work out which field they are fixing, and this tool used to ' +
+      'discard them.',
+    parameters: {
+      type: 'object',
+      properties: {
+        heard: {
+          type: 'string',
+          description: 'Verbatim transcript of what the caller just said, uncorrected.',
+        },
+      },
+      required: ['heard'],
+    },
   },
   {
     type: 'function',

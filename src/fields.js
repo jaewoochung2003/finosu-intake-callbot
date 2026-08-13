@@ -115,6 +115,15 @@ const FIELDS = [
     },
     confirmCovers: ['first_name', 'last_name'],
     respell: 'No problem. Spell your first name for me.',
+    // Any words at all are a valid name, so an answer to this field's read-back
+    // cannot be read as a new name unless the caller marked it as a correction.
+    // "Is that right?" is a closed question; taking an open answer to it as data is
+    // what let "that's right", "bingo" and "aye" replace the surname while the call
+    // carried on and still ended Approved. Every other confirmed field has a shape
+    // that conversation cannot accidentally satisfy — an email needs an at sign, the
+    // bank numbers need nine and eight digits — so a bare correction still lands
+    // there and only this one needs the cue.
+    anyWordsValidate: true,
     // The brief's form has one Name line, so the two answers are joined the moment
     // the second one lands.
     // A half the caller never managed to give leaves the other half standing; the

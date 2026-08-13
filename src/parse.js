@@ -343,6 +343,43 @@ function parseYesNo(text) {
   return null;
 }
 
+// Words that belong to the conversation rather than to the answer: agreement,
+// refusal, hesitation, politeness, and asking for something to be said again.
+//
+// This exists because of what a read-back is. The bot asks "is that right", and the
+// only paths out are yes, no, or a corrected value, so an utterance that is not a
+// recognized yes or no gets read as the correction and written into the field. A
+// name validator accepts almost any words, so "that's right" was accepted as a
+// surname. Widening the yes list fixes the phrases on the list and leaves the trap
+// open for every phrasing nobody thought of.
+//
+// A caller cannot be named "that's right" and cannot bank at "uh huh". So a value
+// has to carry at least one word that is not on this list, which makes an
+// unrecognized answer fall through to "was that a yes or a no" instead of
+// overwriting the thing being confirmed. A real correction ("Reyes", "no, it's
+// Chang", "two six oh five...") always carries a content word and still lands.
+const CONVERSATIONAL = new Set([
+  ...YES, ...NO,
+  'thats', 'that', 'this', 'it', 'its', 'is', 'was', 'am', 'are', 'be', 'been',
+  'i', 'im', 'you', 'we', 'me', 'my', 'your', 'the', 'a', 'an',
+  'right', 'ok', 'okay', 'k', 'alright', 'fine', 'good', 'great', 'perfect',
+  'uh', 'um', 'er', 'ah', 'oh', 'huh', 'hm', 'hmm', 'mm', 'well', 'so', 'like',
+  'what', 'who', 'how', 'again', 'repeat', 'pardon', 'sorry', 'excuse',
+  'say', 'said', 'tell', 'hear', 'heard', 'catch', 'caught', 'got', 'get', 'missed',
+  'one', 'more', 'time', 'once', 'please', 'thanks', 'thank', 'sure', 'yeah',
+  'can', 'could', 'would', 'will', 'do', 'does', 'did', 'have', 'has', 'to', 'of',
+  'and', 'but', 'or', 'for', 'with', 'now', 'then', 'there', 'here', 'up',
+  'correct', 'exactly', 'indeed', 'mhm', 'mmhm', 'uhhuh', 'yep', 'yup',
+]);
+
+// True when every word is conversational, so nothing here can be a captured value.
+// An empty utterance counts, since silence is not a correction either.
+function isConversational(text) {
+  const list = words(String(text == null ? '' : text).replace(/['‘’]/g, ''));
+  if (!list.length) return true;
+  return list.every((w) => CONVERSATIONAL.has(w));
+}
+
 // Asking to stop, as opposed to answering "no" to a question. The model has an
 // end_call tool and it reached for it on a bare "no" during a live test, hanging up
 // on an applicant who was answering the deployed-military question. The server
@@ -836,6 +873,14 @@ function parseName(text) {
       /\b(my name is|my name's|this is|i'?m|it'?s|name'?s|speaking|full name is|umm*|uhh*|err*|ahh*|hmm+|mmm+|yeah|okay|ok)\b/gi,
       ' ',
     )
+    // The lead-in a caller uses when fixing a value they just heard read back.
+    // Without this "actually it should be Chung" was stored as the surname "Actually
+    // Should Be Chung", so a correction produced a worse name than the one it fixed.
+    // Ordered longest first so "it should be" goes before "should be".
+    .replace(
+      /\b(no wait|hang on|hold on|actually|sorry|i said|i meant|that should be|it should be|should be|make it|change it to|change that to|correction|rather|instead)\b/gi,
+      ' ',
+    )
     .replace(/[^A-Za-z\s'-]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -865,6 +910,7 @@ module.exports = {
   parseDate,
   ageOn,
   parseYesNo,
+  isConversational,
   saysStop,
   saysNone,
   parseAmount,
