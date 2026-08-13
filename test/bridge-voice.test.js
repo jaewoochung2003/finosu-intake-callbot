@@ -341,3 +341,17 @@ t('resampling a stream in ragged pieces matches doing it all at once', () => {
   assert.strictEqual(streamed.length, whole.length, 'the streamed line came out a different length');
   assert.ok(streamed.equals(whole), 'a chunk boundary changed the audio');
 });
+
+// The delivery note goes only to the models that accept it. tts-1 rejects the field
+// outright, so sending it to every model would fail every line on the call.
+t('a spelled-out line asks for a different delivery than a plain one', () => {
+  assert.notStrictEqual(
+    voice.styleFor("Okay, 0 2 1 0 0 0 0 2 1. Is that right?"),
+    voice.styleFor('And the city?'),
+  );
+  assert.strictEqual(voice.styleFor('And the city?'), voice.TTS_STYLE_PLAIN);
+  assert.strictEqual(voice.styleFor("Okay, Joe Mama. That's j o e m a m a."), voice.TTS_STYLE_SPELLED);
+  // A stray single letter in ordinary text is not a spelled-out run.
+  assert.strictEqual(voice.styleFor('Is that a yes?'), voice.TTS_STYLE_PLAIN);
+  assert.strictEqual(voice.styleFor('Got it, 473. And the city?'), voice.TTS_STYLE_PLAIN);
+});

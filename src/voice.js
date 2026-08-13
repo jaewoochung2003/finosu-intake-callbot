@@ -23,17 +23,55 @@
 // conversions happen here.
 
 const SPEECH_URL = 'https://api.openai.com/v1/audio/speech';
-const TTS_MODEL = process.env.TTS_MODEL || 'gpt-4o-mini-tts';
+// tts-1, not gpt-4o-mini-tts.
+//
+// The newer model speaks slowly. Not "carefully" — slowly: "And the city?" takes it
+// 1.45 seconds, where tts-1 says the same three words in 0.78 and a person says them
+// in less. Over a form with two dozen questions that is most of a minute of the
+// caller waiting through sentences, and it is what "a bit slow and stuttering" was.
+// Its `speed` control does not fix it either; asking for 1.15 came back LONGER than
+// default, so the number is not being applied in any dependable way.
+//
+// What is given up is the `instructions` field, which tts-1 does not take, so the
+// pacing hint for a spelled-out read-back is gone. That turned out to cost nothing:
+// single characters separated by spaces are read one at a time regardless.
+// TTS_MODEL=gpt-4o-mini-tts puts it back with its style instructions attached.
+const TTS_MODEL = process.env.TTS_MODEL || 'tts-1';
 const TTS_VOICE = process.env.TTS_VOICE || 'alloy';
+// Only tts-1 and tts-1-hd apply it, and 1.0 is already a natural pace.
+const TTS_SPEED = Number(process.env.TTS_SPEED || 1);
+// Which models take a free-text delivery note. The older ones reject the field.
+const TAKES_INSTRUCTIONS = /^gpt-/.test(TTS_MODEL);
 
 // How the line should sound. The speech endpoint takes this as a separate field, so
 // it shapes delivery without being able to change a word — which is the entire point
 // of moving the voice here.
-const TTS_STYLE =
+//
+// There are two, and which one is used depends on the line.
+//
+// There was one to begin with, and it asked for gaps between spelled-out letters and
+// for the end of a sentence not to be rushed. Both are right for a read-back and both
+// were being applied to every line on the call, so "And the city?" took 1.7 seconds to
+// say when a person says it in well under one. On the phone that reads as the bot
+// being slow and halting rather than careful.
+const TTS_STYLE_PLAIN =
   process.env.TTS_STYLE ||
-  'Calm and clear, like a person taking down a form over the phone. ' +
-    'Read digits and spelled-out letters one at a time with a small gap between them. ' +
-    'Do not rush the end of a sentence.';
+  'Calm and clear, at a normal speaking pace, like a person taking down a form over ' +
+    'the phone. Do not slow down and do not leave gaps between words.';
+
+// For a line that spells something out, which is the one place the gaps earn their
+// cost: a caller checking a routing number digit by digit cannot follow it at speed.
+const TTS_STYLE_SPELLED =
+  process.env.TTS_STYLE_SPELLED ||
+  'Calm and clear, like a person taking down a form over the phone. Read the run of ' +
+    'single digits or letters one at a time with a small gap between them. Speak the ' +
+    'rest of the line at a normal pace.';
+
+// A read-back spells its value out as single characters separated by spaces, which is
+// a shape no ordinary sentence has. Three in a row is enough to recognise it and not
+// enough for "a b" in ordinary text to trip it.
+const SPELLED_OUT = /(?:(?:^|\s)[A-Za-z0-9](?=\s)){3,}/;
+const styleFor = (text) => (SPELLED_OUT.test(text) ? TTS_STYLE_SPELLED : TTS_STYLE_PLAIN);
 
 // The rate the speech endpoint returns raw samples at, and the rate a phone line runs
 // at. 24000 divides by 8000 exactly, so the resample is an average of every three
@@ -155,7 +193,8 @@ function request(text, { apiKey = process.env.OPENAI_API_KEY, signal } = {}) {
       model: TTS_MODEL,
       voice: TTS_VOICE,
       input: text,
-      instructions: TTS_STYLE,
+      ...(TAKES_INSTRUCTIONS ? { instructions: styleFor(text) } : {}),
+      ...(TTS_SPEED !== 1 ? { speed: TTS_SPEED } : {}),
       // Raw samples. Every other format the endpoint offers is a container that would
       // have to be decoded here first.
       response_format: 'pcm',
@@ -221,6 +260,9 @@ async function speechFrames(text, opts = {}) {
 
 module.exports = {
   makeResampler,
+  styleFor,
+  TTS_STYLE_PLAIN,
+  TTS_STYLE_SPELLED,
   speechStream,
   speechFrames,
   pcm24kToMulaw8k,
