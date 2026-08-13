@@ -50,11 +50,15 @@ const DTMF_IDLE_MS = 6000;
 // After a keypad entry lands, ignore anything the model tries to save for a moment;
 // it may still be transcribing the tones as speech.
 const DTMF_SUPPRESS_MS = 2500;
-// A much shorter deaf window on the keypad itself, long enough to swallow the extra
-// press on an overtyped fixed-length field and short enough that it cannot block the
-// next field: the caller has to hear the next question before answering it, and the
-// save-answer window above is far too long for that job.
-const DTMF_DEAF_MS = 800;
+// A short deaf window on the keypad itself, to swallow the stray extra press on an
+// overtyped fixed-length field: type five digits for a four digit social and the
+// fifth would otherwise open an entry against the next question and corrupt it.
+//
+// It was 800ms, which is long enough to eat the start of a deliberate next entry from
+// somebody typing steadily through the form. On the questions that now take nothing
+// but the keypad that is the common case, not the rare one, so it is short enough to
+// catch a bounce and nothing more.
+const DTMF_DEAF_MS = 300;
 // Hard stop on how long the sockets stay open after the decision, waiting for the
 // closing line to finish playing.
 const CLOSE_MAX_MS = 15000;
@@ -121,6 +125,9 @@ function handleCall(twilioWs, opts = {}) {
     callsDir = CALLS_DIR,
     quietNudgeMs = QUIET_NUDGE_MS,
     quietEndMs = QUIET_END_MS,
+    // Settable so a test can type two entries back to back without wall-clock delay.
+    dtmfDeafMs = DTMF_DEAF_MS,
+    dtmfSuppressMs = DTMF_SUPPRESS_MS,
     // How long the goodbye line gets to play before the sockets close.
     goodbyeMs = 3000,
   } = opts;
@@ -440,6 +447,12 @@ function handleCall(twilioWs, opts = {}) {
   // turn. The comparison cost every caller their entry.
   const keypadOwnsTheTurn = () => dtmfBuffer.length > 0;
 
+  // Whether the question on the table refuses spoken answers outright.
+  const keypadOnlyQuestion = () => {
+    const open = intake.currentField(session);
+    return !!(open && open.keypadOnly);
+  };
+
   function onToolCall(callId, name, argsJson) {
     if (!callId || handledCalls.has(callId)) return;
     handledCalls.add(callId);
@@ -461,6 +474,20 @@ function handleCall(twilioWs, opts = {}) {
           accepted: false,
           problem: 'Sorry, I did not catch that',
           say_next: intake.nextPrompt(session),
+        };
+      } else if (keypadOnlyQuestion() && !session.pending) {
+        // Four questions take digits and nothing else: the social security digits, the
+        // routing number, the account number and the zip. Speech recognition on a
+        // phone line turns a nine digit routing number into a different bank, and every
+        // parser written to rescue those digits from words has been a source of wrong
+        // records. The keypad has no such failure, so on these the keypad is the only
+        // way in and the answer says so rather than hinting at it.
+        const open = intake.currentField(session);
+        log(session.callSid, `spoken answer refused on ${open.key}, keypad only`);
+        result = {
+          accepted: false,
+          problem: 'I need that on the keypad',
+          say_next: open.ask,
         };
       } else if ((keypadOwnsTheTurn() || Date.now() < suppressSavesUntil) && !session.pending) {
         // The model hears the touch tones as audio and writes them down as words. The
@@ -697,7 +724,7 @@ function handleCall(twilioWs, opts = {}) {
     // submitted, not to the next question. Without it the extra press on an
     // overtyped fixed-length field starts a buffer against the following field.
     if (Date.now() < dtmfDeafUntil) {
-      return trace(`DROPPED, inside the ${DTMF_DEAF_MS}ms window after the last entry`);
+      return trace(`DROPPED, inside the ${dtmfDeafMs}ms window after the last entry`);
     }
     trace('accepted');
 
@@ -779,8 +806,8 @@ function handleCall(twilioWs, opts = {}) {
 
     const r = intake.submitDtmf(session, digits);
     if (!r) return;
-    suppressSavesUntil = Date.now() + DTMF_SUPPRESS_MS;
-    dtmfDeafUntil = Date.now() + DTMF_DEAF_MS;
+    suppressSavesUntil = Date.now() + dtmfSuppressMs;
+    dtmfDeafUntil = Date.now() + dtmfDeafMs;
 
     const line = r.accepted
       ? `${r.note ? `${r.note}. ` : ''}${r.say || ''}`

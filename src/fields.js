@@ -367,8 +367,9 @@ const FIELDS = [
     key: 'ssn_last_four',
     label: 'Last Four of Social',
     group: 'Applicant',
-    ask: 'The last four digits of your social security number. You can say them, or type them on the keypad.',
-    reask: 'Those four digits one more time?',
+    ask: 'Type the last four digits of your social security number on your keypad.',
+    reask: 'Type those four digits on the keypad.',
+    keypadOnly: true,
     dtmf: 4,
     sensitive: true,
     validate: (said) => V.validateSsn4(said),
@@ -377,8 +378,9 @@ const FIELDS = [
     key: 'routing_number',
     label: 'Routing Number',
     group: 'Bank Account',
-    ask: "What's the nine digit routing number? If you have it in front of you, the keypad is the safest way.",
-    reask: 'One more time on that routing number.',
+    ask: 'Type the nine digit routing number on your keypad.',
+    reask: 'Type the nine digits again.',
+    keypadOnly: true,
     dtmf: 9,
     sensitive: true,
     // Digit by digit, and with the bank named. The check digit and the Fed
@@ -399,8 +401,9 @@ const FIELDS = [
     // where it ends. Saying so is what makes the pound key useful; without it a
     // caller typing a long number pauses, the idle timer ends the entry early, and
     // the half they typed is a valid length for an account number.
-    ask: 'And the account number itself. If you type it, press pound when you reach the end.',
-    reask: 'That account number once more?',
+    ask: 'Type the account number on your keypad, then press pound.',
+    reask: 'Type the account number again, then press pound.',
+    keypadOnly: true,
     dtmf: 17,
     sensitive: true,
     // An account number has no check digit and no directory. Nothing but the caller
@@ -451,7 +454,9 @@ const FIELDS = [
     key: 'zip',
     label: 'Zip Code',
     group: 'Address',
-    ask: 'And the zip?',
+    ask: 'Type your five digit zip code on the keypad.',
+    reask: 'Type the five digits again.',
+    keypadOnly: true,
     dtmf: 5,
     validate: (said) => V.validateZip(said),
   },

@@ -47,7 +47,7 @@ class FakeSocket {
 
 // Stands up one call with both sockets faked and returns everything a test needs
 // to drive it.
-function startCall({ callsDir, quietNudgeMs, quietEndMs, goodbyeMs } = {}) {
+function startCall({ callsDir, quietNudgeMs, quietEndMs, goodbyeMs, dtmfDeafMs = 0, dtmfSuppressMs = 0 } = {}) {
   const twilio = new FakeSocket();
   const openai = new FakeSocket();
   const emails = [];
@@ -60,6 +60,11 @@ function startCall({ callsDir, quietNudgeMs, quietEndMs, goodbyeMs } = {}) {
       return { sent: true, via: 'test', id: 'x' };
     },
     callsDir: callsDir || fs.mkdtempSync(path.join(os.tmpdir(), 'callbot-')),
+    // The window after a commit exists to swallow a stray extra press. These tests
+    // type entries back to back with no wall clock between them, which is not what it
+    // guards against, so it is off here and covered by its own test.
+    dtmfDeafMs,
+    dtmfSuppressMs,
     ...(quietNudgeMs ? { quietNudgeMs } : {}),
     ...(quietEndMs ? { quietEndMs } : {}),
     ...(goodbyeMs ? { goodbyeMs } : {}),
@@ -423,8 +428,28 @@ t('an unknown tool name does not throw', () => {
 // Walks the call to a named field by answering everything before it.
 // Plays the canned answers up to `index`. The canned script carries the read-back
 // confirmations as turns of their own, so this walks the same path a caller does.
+// Four questions take digits and nothing else, so a caller reaches them by typing.
+// The canned script holds those answers as spoken words, which is right for the
+// offline harness driving intake directly, and wrong on a live call where the bridge
+// refuses speech on those fields.
+const TYPED = {
+  [SCRIPTS.INDEX.ssn]: '4821',
+  [SCRIPTS.INDEX.routing]: '021000021',
+  [SCRIPTS.INDEX.account]: '5512340987#',
+  [SCRIPTS.INDEX.zip]: '94404',
+};
+
+function playTurn(call, i) {
+  if (TYPED[i]) call.press(TYPED[i]);
+  else call.say(SCRIPTS.APPROVED[i]);
+}
+
 function walkTo(call, index) {
-  for (const line of SCRIPTS.APPROVED.slice(0, index)) call.say(line);
+  for (let i = 0; i < index; i++) playTurn(call, i);
+}
+
+function playAll(call) {
+  for (let i = 0; i < SCRIPTS.APPROVED.length; i++) playTurn(call, i);
 }
 
 t('typed digits fill a digit field and skip speech entirely', () => {
@@ -474,10 +499,11 @@ t('the first keypress stops the bot talking', () => {
 });
 
 t('an extra digit on a full field does not start a buffer on the next one', async () => {
-  const call = startCall();
+  // This is the one test that exercises the deaf window, so it runs with it on.
+  const call = startCall({ dtmfDeafMs: 300 });
   walkTo(call, SCRIPTS.INDEX.ssn);
   call.press('48215'); // one too many for a four digit field
-  await sleep(900); // past the keypad deaf window, which is shorter than a question
+  await sleep(400); // past the keypad deaf window, which is shorter than a question
   // The routing number question is next and must not be holding a stray "5".
   call.press('021000021');
   const said = call.openai
@@ -508,17 +534,18 @@ t('while digits are being typed the keypad owns the question', () => {
   assert.match(spoken, /routing number/i, 'the completed entry did not move the form on');
 });
 
-t('star clears a half-typed entry so the caller can speak instead', () => {
-  // The way out for someone who starts typing and changes their mind. The question
-  // already offers it, and it is what keeps the rule above from trapping anyone.
+t('star clears a half-typed entry and the caller types it again', () => {
+  // The way out for somebody who fumbles a digit. Speaking is not the way out on
+  // these four questions, because they take the keypad and nothing else, so star
+  // wipes the entry and the next press starts a fresh one.
   const call = startCall();
   walkTo(call, SCRIPTS.INDEX.routing);
-  call.press('0210');
+  call.press('0219');   // a wrong digit
   call.press('*');
-  call.say('zero two one zero zero zero zero two one');
-  const r = call.lastToolResult();
-  assert.strictEqual(r.accepted, true, 'the spoken answer was refused after a clear');
-  assert.match(r.say_next, /Is that right\?$/);
+  call.press('021000021');
+  const said = call.openai.ofType('response.create').map((m) => m.response.instructions).join(' ');
+  assert.match(said, /Is that right/i, 'the retyped number did not land');
+  assert.doesNotMatch(said, /0 2 1 9/, 'the cleared digits survived');
 });
 
 // ---------- end of call ----------
@@ -526,7 +553,7 @@ t('star clears a half-typed entry so the caller can speak instead', () => {
 t('hanging up writes the record and sends exactly one email', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'callbot-'));
   const call = startCall({ callsDir: dir });
-  for (const line of SCRIPTS.APPROVED) call.say(line);
+  playAll(call);
   call.hangUp();
   call.twilio.close(); // a real hangup fires both
   await new Promise((r) => setTimeout(r, 20));
