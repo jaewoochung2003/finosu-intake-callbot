@@ -802,9 +802,28 @@ function parseEmail(text) {
     else tokens.push(w);
   }
 
-  const collapsed = tokens.join('').replace(/[.!?;:,]+$/, '');
+  const collapsed = spelledRunsJoined(tokens.join('').replace(/[.!?;:,]+$/, ''));
   if (/^[^@]+@[^@]+\.[a-z]{2,}$/.test(collapsed)) return collapsed;
   return null;
+}
+
+// "z-o-e-y@gmail.com" is somebody spelling zoey, not an address with three hyphens.
+//
+// Asked to spell an address one letter at a time, a caller says "zed oh ee why" and
+// the transcriber writes it back hyphenated, which is how English writes a spelled
+// word. Kept as typed it went on the form as z-o-e-y@gmail.com and was read back as
+// "z dash o dash e dash y", which is both wrong and unmistakably wrong, so the caller
+// says no and spells it again and gets the same thing.
+//
+// Only a run of single characters counts: three or more of them, each one character
+// long, joined by hyphens. A real hyphenated address has a word on at least one side
+// of the hyphen, so "mary-jane" and "j-p-morgan" keep theirs. Spaces are already gone
+// by here and dots are left alone, because a dot between letters is ordinary in an
+// address and is not how anyone spells out loud.
+function spelledRunsJoined(s) {
+  return s.replace(/(?:^|(?<=[^a-z0-9]))([a-z0-9](?:-[a-z0-9]){2,})(?=$|[^a-z0-9])/g, (run) =>
+    run.replace(/-/g, ''),
+  );
 }
 
 // ---------- small enums ----------
@@ -870,6 +889,15 @@ function parseEnum(text, options, synonyms = {}) {
 
   const esc = (p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const hasWord = (phrase) => new RegExp(`\\b${esc(phrase)}\\b`).test(raw);
+  // An option named in the plural is that option. "What's your work situation?" —
+  // "Students." Said three times, transcribed correctly all three times, refused all
+  // three, because \b student \b does not match "students": a word boundary wants a
+  // non-word character next and the s is a word character. The field then gave up and
+  // the application went out with no employment status on it.
+  //
+  // Only a trailing s, and only on the end of the phrase, so this is "student" and
+  // "students" and nothing looser.
+  const hasOption = (phrase) => new RegExp(`\\b${esc(phrase)}s?\\b`).test(raw);
 
   // Synonyms first, because a multi-word synonym often contains a bare option word:
   // "bi weekly" holds "weekly", "semi monthly" holds "monthly", "share draft" is a
@@ -901,7 +929,7 @@ function parseEnum(text, options, synonyms = {}) {
   // the word "employed", so Employed is dropped in favor of Self-employed rather than
   // counted as a second, conflicting option. Two distinct options named ("checking or
   // savings? checking") is ambiguous and re-asks.
-  const present = options.filter((o) => hasWord(words(o).join(' ')));
+  const present = options.filter((o) => hasOption(words(o).join(' ')));
   const maximal = present.filter((o) => {
     const k = ` ${words(o).join(' ')} `;
     return !present.some((o2) => o2 !== o && ` ${words(o2).join(' ')} `.includes(k));

@@ -48,8 +48,8 @@ const TTS_VOICE = process.env.TTS_VOICE || 'alloy';
 // generation varies between requests: 0.9, 1.0 and 1.05 all came back within 40 ms of
 // each other on a three word question, which reads as "speed does nothing", while the
 // same three values on the greeting came back 12.1, 10.7 and 9.6 seconds.
-const TTS_SPEED_PLAIN = Number(process.env.TTS_SPEED_PLAIN || process.env.TTS_SPEED || 1.05);
-const TTS_SPEED_SPELLED = Number(process.env.TTS_SPEED_SPELLED || 0.75);
+const TTS_SPEED_PLAIN = Number(process.env.TTS_SPEED_PLAIN || process.env.TTS_SPEED || 0.9);
+const TTS_SPEED_SPELLED = Number(process.env.TTS_SPEED_SPELLED || 0.6);
 const speedFor = (text) => (SPELLED_OUT.test(text) ? TTS_SPEED_SPELLED : TTS_SPEED_PLAIN);
 // Which models take a free-text delivery note. The older ones reject the field.
 const TAKES_INSTRUCTIONS = /^gpt-/.test(TTS_MODEL);

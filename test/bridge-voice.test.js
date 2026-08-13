@@ -205,14 +205,31 @@ t('the read-back waits for an answer and only the caller can give one', async ()
   assert.match(call.spoken[call.spoken.length - 1], /email/i);
 });
 
-t('line noise is not an answer', async () => {
+t('line noise is not an answer, but is not met with silence either', async () => {
   const call = startCall();
   await sleep(10);
-  const before = call.spoken.length;
   call.say('Thank you.');
-  call.say('Bye.');
+  await sleep(20);
+  // Not written into the form...
+  assert.doesNotMatch(call.spoken.join(' '), /that's t h a n k/i, 'filler was taken as a name');
+  // ...and not answered with nothing. On a live call the caller spoke, heard nothing
+  // back, and sat there saying "Hello?" into a bot they could not tell from a dead
+  // line.
+  assert.strictEqual(call.spoken.length, 2, `spoke: ${JSON.stringify(call.spoken)}`);
+  assert.match(call.spoken[1], /did not catch that/i);
+  assert.match(call.spoken[1], /first name/i, 'the open question was not asked again');
+});
+
+// Twice, then quiet. A line producing noise on its own must not be argued with
+// forever; the quiet watch already ends a call nobody is talking on.
+t('a line that only produces noise is not answered forever', async () => {
+  const call = startCall();
   await sleep(10);
-  assert.strictEqual(call.spoken.length, before, 'Whisper filler was taken as a name');
+  for (let i = 0; i < 5; i++) {
+    call.say('Thank you.');
+    await sleep(15);
+  }
+  assert.ok(call.spoken.length <= 3, `said ${call.spoken.length} lines at a noisy line`);
 });
 
 // ---------- the microphone ----------
@@ -409,4 +426,31 @@ t('the same word twice is two answers when the bot asked twice', async () => {
 t('the transcriber is told the call is in English', () => {
   const s = earSession('gpt-realtime');
   assert.strictEqual(s.session.audio.input.transcription.language, 'en');
+});
+
+// "z-o-e-y@gmail.com" is somebody spelling zoey, not an address with three hyphens.
+// Asked to spell it one letter at a time, the caller said "zed oh ee why" and the
+// transcriber wrote it back hyphenated, which is how English writes a spelled word.
+// It went on the form as z-o-e-y@gmail.com and was read back as "z dash o dash e dash
+// y", so the caller said no and spelled it again and got the same thing.
+t('an address spelled one letter at a time does not keep the hyphens', () => {
+  const P = require('../src/parse');
+  assert.strictEqual(P.parseEmail('z-o-e-y at gmail dot com'), 'zoey@gmail.com');
+  assert.strictEqual(P.parseEmail('J-O-E at gmail.com'), 'joe@gmail.com');
+  // A real hyphen has a word on at least one side of it and stays.
+  assert.strictEqual(P.parseEmail('mary-jane at gmail dot com'), 'mary-jane@gmail.com');
+  assert.strictEqual(P.parseEmail('j-p-morgan at chase dot com'), 'j-p-morgan@chase.com');
+});
+
+// "What's your work situation?" — "Students." Said three times, transcribed correctly
+// all three times, refused all three, and the field gave up with nothing on it.
+t('an option named in the plural is that option', () => {
+  const P = require('../src/parse');
+  const JOBS = ['Employed', 'Self-employed', 'Unemployed', 'Retired', 'Student'];
+  assert.strictEqual(P.parseEnum('Students.', JOBS, {}), 'Student');
+  assert.strictEqual(P.parseEnum('student', JOBS, {}), 'Student');
+  // The thing this must not break: naming both options is still ambiguous, and a
+  // negative is still not an answer.
+  assert.strictEqual(P.parseEnum('checking or savings? checking', ['Checking', 'Savings'], {}), null);
+  assert.strictEqual(P.parseEnum('not a student', JOBS, {}), null);
 });

@@ -184,6 +184,8 @@ function handleCall(twilioWs, opts = {}) {
   // A second one before the bot has spoken is the same utterance arriving in pieces.
   let heardSinceLine = false;
   let lastAnsweredField = '';
+  // Consecutive transcripts that were nothing but line noise.
+  let noiseInARow = 0;
   // One line at a time, in the order they were written. Speaking is asynchronous —
   // the audio is fetched while the call runs — so without a queue a line written
   // during another line's fetch would race it onto the wire.
@@ -319,7 +321,14 @@ function handleCall(twilioWs, opts = {}) {
     const result = intake.submit(session, String(said));
     if (!result) return;
 
-    const endStopped = (s) => (/[.!?]$/.test(String(s).trim()) ? String(s).trim() : `${String(s).trim()}.`);
+    // A sentence starts with a capital, and these are read aloud one after another.
+    // A validator's note is written as a fragment ("read back as (240) 278-6143"),
+    // which came out of the phone as a sentence beginning in lower case.
+    const endStopped = (s) => {
+      const t = String(s).trim();
+      const up = t.charAt(0).toUpperCase() + t.slice(1);
+      return /[.!?]$/.test(up) ? up : `${up}.`;
+    };
     const line = [
       result.problem ? endStopped(result.problem) : null,
       result.note ? endStopped(result.note) : null,
@@ -371,9 +380,24 @@ function handleCall(twilioWs, opts = {}) {
         nudged = false;
         if (!said) break;
         if (isNotSpeech(said)) {
+          // Not written into the form, but not answered with nothing either.
+          //
+          // "Thank you" and "Bye" are what the transcriber writes when it is handed
+          // sound it cannot make words of, so they are never an answer. Dropping them
+          // in silence was the other half of the mistake: the caller had spoken, heard
+          // nothing back, and had no way to tell a bot that had ignored them from one
+          // that had died. On a live call that happened on the work-situation question
+          // and the caller sat there saying "Hello?".
+          //
+          // Twice, then quiet. If the line is producing noise on its own, asking again
+          // forever makes it worse, and the quiet watch already ends a call nobody is
+          // talking on.
           log(session.callSid, 'ignored line noise:', JSON.stringify(said.slice(0, 40)));
+          noiseInARow += 1;
+          if (noiseInARow <= 2) say(`Sorry, I did not catch that. ${intake.openPrompt(session)}`);
           break;
         }
+        noiseInARow = 0;
         // One utterance, two transcripts.
         //
         // The voice detector can call a turn over inside a word and open another, and
