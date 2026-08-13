@@ -266,6 +266,31 @@ function applyDerived(session, field, result) {
   if (result.bank) session.record.bank_name = result.bank;
 }
 
+// The other half of applyDerived: when a field is taken back out of the record,
+// everything that was computed from it has to go too.
+//
+// Only undoLast did this, and only for the routing number. The two paths through the
+// read-back that also clear a field did not, so a caller who heard "that's Chase"
+// and said no left `bank_name: "JPMORGAN CHASE"` standing over a record with no
+// routing number in it. The email then named a FedACH-verified bank for an
+// application that had none, which is worse than printing nothing.
+function clearDerived(session, key) {
+  if (key === 'routing_number') delete session.record.bank_name;
+  if (key === 'monthly_income') delete session.record.income_over_2000;
+  if (key === 'income_over_2000') delete session.record.monthly_income;
+  // Unemployed sets both income slots from the status answer (see fields.js), so
+  // walking back to the status question has to drop them, or a caller who corrects
+  // "unemployed" to "employed" keeps a stale income of 0 and is never asked the figure.
+  if (key === 'employment_status') {
+    delete session.record.monthly_income;
+    delete session.record.income_over_2000;
+  }
+  // The joined `name` comes off the last-name step, so clearing either half has to
+  // clear it, or a retracted name survives as a stale value that satisfies the
+  // required-field gate in decision.js.
+  if (key === 'first_name' || key === 'last_name') delete session.record.name;
+}
+
 function resolveConfirmation(session, said) {
   const pending = session.pending;
   const field = FIELDS.find((f) => f.key === pending.key);
@@ -301,7 +326,10 @@ function resolveConfirmation(session, said) {
     // sent the re-spelled whole name into the last name field, and the read-back
     // came back "Jae Woo Jaewoo Chung".
     const covers = field.confirmCovers || [field.key];
-    for (const key of covers) delete session.record[key];
+    for (const key of covers) {
+      delete session.record[key];
+      clearDerived(session, key);
+    }
     if (field.derive) for (const key of Object.keys(field.derive('', {}))) delete session.record[key];
     session.index = FIELDS.findIndex((f) => f.key === covers[0]);
     session.attempts = 0;
@@ -313,14 +341,16 @@ function resolveConfirmation(session, said) {
     };
   }
 
-  // Not a yes or a no. Take it as the corrected answer if it reads as one.
-  const retry = field.validate(said, session.record);
-  if (retry.ok && retry.value !== pending.value) return acceptCorrection(session, field, said, retry);
-
   // "What?" / "say that again" is a request to repeat, not a failure to confirm.
   // Re-read the value without counting it toward giving up, so a caller on a bad
   // line who asks for a repeat is not skipped past with the value locked in.
-  if (/\b(what|huh|pardon|sorry|repeat|again|come again|didnt (hear|catch)|one more time|say that)\b/.test(
+  //
+  // This runs BEFORE the correction path below. The other order looked harmless and
+  // was not: a name validator accepts almost any words, so "say that again" validated
+  // as a name, differed from the pending value, and got taken as a correction. The
+  // caller asked to hear their name and the bot wrote "Say That Again" in as the
+  // surname. Anything that reads as a request to repeat is never a new value.
+  if (/\b(what|huh|pardon|sorry|repeat|again|come again|didnt (hear|catch)|didnt get|one more time|say that)\b/.test(
     String(said).toLowerCase(),
   )) {
     return {
@@ -330,6 +360,10 @@ function resolveConfirmation(session, said) {
     };
   }
 
+  // Not a yes or a no. Take it as the corrected answer if it reads as one.
+  const retry = field.validate(said, session.record);
+  if (retry.ok && retry.value !== pending.value) return acceptCorrection(session, field, said, retry);
+
   pending.tries += 1;
   if (pending.tries >= 2) {
     session.pending = null;
@@ -338,6 +372,7 @@ function resolveConfirmation(session, said) {
     // send the field back to be re-captured (its own give-up marks it unresolved).
     if (field.sensitive) {
       delete session.record[field.key];
+      clearDerived(session, field.key);
       session.index = FIELDS.findIndex((f) => f.key === field.key);
       session.attempts = 0;
       session.askedAt = Date.now();
@@ -476,20 +511,7 @@ function undoLast(session) {
   // was asked, and it carries the revision count that makes the re-answer legible
   // as a correction rather than a first answer.
   delete session.record[field.key];
-  if (field.key === 'routing_number') delete session.record.bank_name;
-  if (field.key === 'monthly_income') delete session.record.income_over_2000;
-  if (field.key === 'income_over_2000') delete session.record.monthly_income;
-  // Unemployed sets both income slots from the status answer (see fields.js). Walking
-  // back to the status question has to drop them, or a caller who corrects "unemployed"
-  // to "employed" keeps a stale income of 0 and never gets asked the figure.
-  if (field.key === 'employment_status') {
-    delete session.record.monthly_income;
-    delete session.record.income_over_2000;
-  }
-  // The joined `name` is derived from the last-name step, so walking back the FIRST
-  // name never recomputed it. Clearing it on either half means a retracted name can't
-  // survive as a stale value that satisfies the required-field gate.
-  if (field.key === 'first_name' || field.key === 'last_name') delete session.record.name;
+  clearDerived(session, field.key);
   session.unresolved = session.unresolved.filter((k) => k !== field.key);
   session.index = i;
   session.attempts = 0;

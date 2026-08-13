@@ -294,6 +294,16 @@ const REFUSAL =
 // "i was" and "i did" are dropped here and caught by the past-experience guard below.
 const AFFIRMATIVE_PHRASE = /\b(i do|i am|i m|i have|i is|that i am|we do|yes i (do|am|have))\b/;
 
+// What people actually say to a read-back. "Right" cannot go in the YES set on its
+// own, because it is also filler and the knockout questions themselves say "right
+// now", so "right, no I'm not deployed" would read as a yes. Bound to the phrase
+// instead: "that's right" confirms, a leading "no" still wins over it, and "that's
+// not right" is caught by the negation check above this.
+// Without these, answering the name read-back with "that's right" fell through to
+// the correction path and wrote the phrase in as the caller's surname.
+const CONFIRMATION_PHRASE =
+  /\b(thats right|that is right|thats correct|that is correct|thats it|thats the one|thats me|thats mine|you got it|got it right|sounds right|sounds good|looks right|uh huh|uh hu|mm hmm|mm hm|m hm|all right|thats what i said)\b/;
+
 // Past or finished-experience phrasing on a present-tense question. A veteran
 // describing prior service is not currently deployed, so this forces a re-ask rather
 // than reading "I was in the service" as a yes.
@@ -323,6 +333,7 @@ function parseYesNo(text) {
   if (PAST_EXPERIENCE.test(joined) && !/\b(i am|i m|currently|right now|still|these days|presently)\b/.test(joined)) {
     return null;
   }
+  if (CONFIRMATION_PHRASE.test(joined)) return true;
   if (AFFIRMATIVE_PHRASE.test(joined)) return true;
 
   for (const w of list) {
@@ -733,7 +744,26 @@ function parseEnum(text, options, synonyms = {}) {
   const raw = words(text).join(' ');
   if (!raw) return null;
 
-  const hasWord = (phrase) => new RegExp(`\\b${phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(raw);
+  const esc = (p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  // A word the caller ruled out is not the word they chose. "I'm not employed" named
+  // Employed and nothing else, so the plain scan recorded Employed and the
+  // NOT_EMPLOYED knockout never fired; "not monthly, every Friday" recorded Monthly
+  // and declined a weekly earner on a converted figure they never gave.
+  //
+  // Bare "no" is deliberately not a negator here. "No, checking" and "no, monthly" are
+  // ordinary answers where the no belongs to something else, and treating that leading
+  // no as a negation would re-ask a caller who answered the question properly. Only
+  // the not/n't family and "never" rule an option out.
+  const NEGATOR = /\b(not|nt|cannot|isnt|arent|aint|dont|doesnt|didnt|wasnt|werent|never)\b/;
+  const negated = (phrase) => {
+    // Up to two words of lead-in, so "I am not employed" is caught and "I am employed"
+    // is not. A negator inside the phrase itself ("not working", a real synonym for
+    // Unemployed) never appears in the window, so those keep working.
+    const m = raw.match(new RegExp(`((?:\\b[a-z0-9]+\\b ){0,2})\\b${esc(phrase)}\\b`));
+    return !!m && NEGATOR.test(m[1]);
+  };
+  const hasWord = (phrase) => new RegExp(`\\b${esc(phrase)}\\b`).test(raw) && !negated(phrase);
 
   // Synonyms first, because a multi-word synonym often contains a bare option word:
   // "bi weekly" holds "weekly", "semi monthly" holds "monthly", "share draft" is a

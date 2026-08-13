@@ -256,9 +256,19 @@ function handleCall(twilioWs, opts = {}) {
 
       // What the bot actually said, so a dropped or reworded line is visible in the
       // log instead of guessed at from the caller's report.
+      //
+      // Masked while a sensitive field is open, because the bot's own line is where
+      // the number gets read back: "Okay, zero two six zero zero nine five nine three"
+      // put a full routing number in the server log in the clear, on the one path that
+      // masks the caller's side of the same exchange. V.redact takes both the digits
+      // and the spelled-out words.
       case 'response.output_audio_transcript.done':
       case 'response.audio_transcript.done':
-        if (msg.transcript) log(session.callSid, 'bot:', msg.transcript.slice(0, 160));
+        if (msg.transcript) {
+          const open = session.pending ? session.pending.key : (intake.currentField(session) || {}).key;
+          const spoken = V.redact(open, msg.transcript);
+          log(session.callSid, 'bot:', spoken.slice(0, 160));
+        }
         break;
 
       case 'response.done': {

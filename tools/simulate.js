@@ -136,7 +136,12 @@ function runInteractive() {
 
 (async () => {
   if (has('--list')) {
+    // scripts.js exports the canned calls alongside two raw turn arrays (INDEX and
+    // APPROVED) that the tests import directly. Only the described ones are callable
+    // by name, so listing walks past anything without a description rather than
+    // reading `.expect` off an array and crashing on the first entry.
     for (const [name, s] of Object.entries(SCRIPTS)) {
+      if (!s || typeof s.expect !== 'string') continue;
       console.log(`  ${name.padEnd(14)} ${s.expect.padEnd(11)} ${s.about}`);
     }
     return;

@@ -207,7 +207,15 @@ const FIELDS = [
     appliesWhen: (app) => app.employment_status !== 'Unemployed',
     // The boolean the brief asks for is derived here rather than asked, so the
     // record keeps the number. Move the threshold and this follows it.
-    derive: (monthly) => ({ income_over_2000: monthly > INCOME_THRESHOLD }),
+    //
+    // `>=`, not `>`, so the boolean says the same thing the decision says. The brief's
+    // field ("over 2000") and its reject rule ("less than 2000") disagree at exactly
+    // 2,000, and decision.js follows the rule and approves there. With a bare `>` the
+    // form printed "If salary is over 2000 dollars a month: No" three lines above an
+    // Approved decision on the same page, which reads as a bug in the form whichever
+    // way the boundary is meant to go. This is the boolean the decision's own fallback
+    // reads, so it means "clears the income rule".
+    derive: (monthly) => ({ income_over_2000: monthly >= INCOME_THRESHOLD }),
     validate: (said, app) => V.validateMonthlyIncome(said, app.pay_frequency),
   },
   {
