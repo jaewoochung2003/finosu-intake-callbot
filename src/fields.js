@@ -226,6 +226,39 @@ const FIELDS = [
     skipValue: 'N/A',
     validate: (said) => V.validateEnum(said, PAY_FREQUENCIES, PAY_FREQUENCY_SYNONYMS),
   },
+  // The pay-day question sits with the pay questions, straight after the cadence that
+  // decides which of the two applies. It used to live in the employer block, where it
+  // followed "are you in a particular department?" and asked "which day does that land
+  // on?" with nothing in earshot for "that" to mean; a caller stopped and asked what it
+  // was about. The printed form is unaffected: FORM_ORDER owns the brief's order
+  // separately from the order the questions are asked in.
+  {
+    key: 'pay_frequency_day',
+    label: 'Pay Frequency Day',
+    group: 'Employment',
+    ask: 'And which day of the week does that land on?',
+    reask: 'Which day of the week?',
+    // Only a weekly or biweekly schedule has a day of the week.
+    appliesWhen: (app) => app.pay_frequency === 'Weekly' || app.pay_frequency === 'Biweekly',
+    skipValue: 'N/A',
+    validate: (said) => {
+      const day = require('./parse').parseWeekday(said);
+      return day ? { ok: true, value: day } : { ok: false, error: 'I need a day of the week' };
+    },
+  },
+  {
+    key: 'specific_day',
+    label: 'Specific Day',
+    group: 'Employment',
+    ask: 'And which day or days of the month is that?',
+    reask: 'Which day of the month?',
+    appliesWhen: (app) => app.pay_frequency === 'Semiweekly' || app.pay_frequency === 'Monthly',
+    skipValue: 'N/A',
+    validate: (said) => {
+      const day = require('./parse').parseDayOfMonth(said);
+      return day ? { ok: true, value: day } : { ok: false, error: 'I need a day of the month' };
+    },
+  },
   {
     key: 'monthly_income',
     label: 'Monthly income',
@@ -428,38 +461,6 @@ const FIELDS = [
     skipValue: 'None',
     validate: (said) =>
       V.bareYesNeedsValue(said, 'Which department?') || V.validateText(said, { min: 2, max: 60 }),
-  },
-  {
-    key: 'pay_frequency_day',
-    label: 'Pay Frequency Day',
-    group: 'Employment',
-    // Prefaced, because this sits in the employer block but asks about pay. Straight
-    // after 'are you in a particular department?', a bare 'which day does that land
-    // on?' has no antecedent a caller can hear, and one asked what it was about.
-    ask: 'Back to your pay for a second. Which day of the week do you get paid?',
-    reask: 'Which day of the week?',
-    // Only a weekly or biweekly schedule has a day of the week.
-    appliesWhen: (app) => app.pay_frequency === 'Weekly' || app.pay_frequency === 'Biweekly',
-    skipValue: 'N/A',
-    validate: (said) => {
-      const day = require('./parse').parseWeekday(said);
-      return day ? { ok: true, value: day } : { ok: false, error: 'I need a day of the week' };
-    },
-  },
-  {
-    key: 'specific_day',
-    label: 'Specific Day',
-    group: 'Employment',
-    // Same reason as pay_frequency_day above: this follows the department question,
-    // so it names what it is asking about instead of pointing at 'that'.
-    ask: 'Back to your pay for a second. Which day or days of the month do you get paid?',
-    reask: 'Which day of the month?',
-    appliesWhen: (app) => app.pay_frequency === 'Semiweekly' || app.pay_frequency === 'Monthly',
-    skipValue: 'N/A',
-    validate: (said) => {
-      const day = require('./parse').parseDayOfMonth(said);
-      return day ? { ok: true, value: day } : { ok: false, error: 'I need a day of the month' };
-    },
   },
   {
     key: 'employer_address',

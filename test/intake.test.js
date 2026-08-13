@@ -109,7 +109,14 @@ t('savings ends the call before the account number', () => {
 });
 
 t('with knockouts off the whole form is asked and the decision is the same', () => {
-  const s = play(SCRIPTS.savings.turns, { earlyKnockout: false });
+  // Built in the same mode it is played in. With knockouts off the call keeps going
+  // past the savings answer and asks the whole form, so it needs the answers for all
+  // of it; the knockout-on script stops at the decline and is shorter.
+  const turns = SCRIPTS.build(
+    { ...SCRIPTS.BASE, account_type: 'savings' },
+    { earlyKnockout: false },
+  ).turns;
+  const s = play(turns, { earlyKnockout: false });
   assert.strictEqual(s.outcome.decision, 'Declined');
   assert.strictEqual(s.record.account_number, '5512340987'); // it did ask
   assert.deepStrictEqual(s.outcome.reasons.map((r) => r.code), ['ACCOUNT_TYPE_SAVINGS']);

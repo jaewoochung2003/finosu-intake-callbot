@@ -255,13 +255,23 @@ t('regression: stepping back skips a question the caller never heard', () => {
 // answer. A shifted script still landed on the expected decision, so the suite
 // passed while testing the wrong call.
 
-t('regression: replacing one turn with two lengthens the script', () => {
+t('regression: a field answered twice adds a turn, it does not replace one', () => {
+  // The scripts used to be positional arrays patched by index, and an early version
+  // of that patcher removed one turn to insert two, silently deleting the following
+  // question's answer while the script still landed on the expected decision. The
+  // answers are keyed by field now and the turn list is built by walking the real
+  // script, so a field answered twice is simply one more turn.
   assert.strictEqual(
     SCRIPTS['fake-routing'].turns.length,
     SCRIPTS.APPROVED.length + 1,
-    'variant() dropped a turn',
+    'the refused routing number did not add a turn',
   );
-  assert.strictEqual(SCRIPTS.savings.turns.length, SCRIPTS.APPROVED.length);
+  // A call that declines early is SHORTER, because the builder stops where the call
+  // stops instead of carrying answers to questions nobody is asked.
+  assert.ok(
+    SCRIPTS.savings.turns.length < SCRIPTS.APPROVED.length,
+    'the savings decline should end before the full form',
+  );
 });
 
 t('regression: every canned script still answers every question it reaches', () => {
@@ -528,10 +538,10 @@ t('regression: a real employer phone still captures', () => {
 t('regression: the income figure comes back as a spoken note', () => {
   const s = intake.startSession({ callSid: 'reg' });
   let r;
-  for (let i = 0; i <= 9; i++) r = intake.submit(s, SCRIPTS.APPROVED[i]);
+  for (let i = 0; i <= SCRIPTS.INDEX.income; i++) r = intake.submit(s, SCRIPTS.APPROVED[i]);
   assert.ok(r.note && /a month/.test(r.note), `income note not spoken: ${JSON.stringify(r.note)}`);
   // and the yes/no screening answers right after it stay silent
-  r = intake.submit(s, SCRIPTS.APPROVED[10]);
+  r = intake.submit(s, SCRIPTS.APPROVED[SCRIPTS.INDEX.military]);
   assert.strictEqual(r.note, null, `military yes/no grew a note: ${JSON.stringify(r.note)}`);
 });
 
@@ -543,7 +553,7 @@ t('regression: the income figure comes back as a spoken note', () => {
 
 t('regression: correcting the routing number updates the bank name', () => {
   const s = intake.startSession({ callSid: 'reg' });
-  for (let i = 0; i <= 13; i++) intake.submit(s, SCRIPTS.APPROVED[i]);
+  for (let i = 0; i < SCRIPTS.INDEX.routing; i++) intake.submit(s, SCRIPTS.APPROVED[i]);
   intake.submit(s, 'zero two one zero zero zero zero two one'); // Chase, pending
   intake.submit(s, 'zero two six zero zero nine five nine three'); // BofA correction
   intake.submit(s, 'yes');
@@ -889,7 +899,7 @@ t('regression: lakh/crore scale, and vague quantifiers re-ask', () => {
 // value, locking in a possibly-wrong SSN or bank number. It must re-capture instead.
 t('regression: a sensitive read-back never silently banks an unconfirmed value', () => {
   const s = intake.startSession({ callSid: 'reg' });
-  for (let i = 0; i <= 13; i++) intake.submit(s, SCRIPTS.APPROVED[i]);
+  for (let i = 0; i < SCRIPTS.INDEX.routing; i++) intake.submit(s, SCRIPTS.APPROVED[i]);
   intake.submit(s, 'zero two one zero zero zero zero two one'); // routing, pending confirm
   const repeat = intake.submit(s, 'huh what'); // a repeat request re-reads, no give-up
   assert.match(repeat.say, /Is that right/);
@@ -921,7 +931,7 @@ t('regression: a Federal Reserve routing number is refused', () => {
 // value, so the audit trail the bot advertises missed its most common correction path.
 t('regression: a read-back correction is written to the correction log', () => {
   const s = intake.startSession({ callSid: 'reg' });
-  for (let i = 0; i <= 13; i++) intake.submit(s, SCRIPTS.APPROVED[i]);
+  for (let i = 0; i < SCRIPTS.INDEX.routing; i++) intake.submit(s, SCRIPTS.APPROVED[i]);
   intake.submit(s, 'zero two six zero zero nine five nine three'); // BofA routing, pending
   intake.submit(s, 'zero two one zero zero zero zero two one'); // corrected to Chase
   const logged = s.corrections.find((c) => c.field === 'routing_number');
