@@ -325,6 +325,34 @@ t('the tones of a half-typed number are never filed as the answer', () => {
   assert.match(spoken, /Is that right/i, 'the completed keypad entry was not read back');
 });
 
+t('finishing a keypad entry mid-line never cancels the model', () => {
+  // A caller typing the routing number while the question was still playing hit the
+  // ninth digit and the read-back went out with cancelFirst, cutting the model off.
+  // The model treats that as something to recover from and writes itself extra lines,
+  // which land on top of the digits. The obsolete line is silenced instead, and the
+  // read-back waits for it to finish rather than racing it.
+  const call = startCall();
+  walkTo(call, SCRIPTS.INDEX.routing);
+  call.openai.emit('message', JSON.stringify({ type: 'response.created', response: { id: 'r_question' } }));
+  const before = call.openai.ofType('response.create').length;
+
+  call.press('021000021'); // the whole number, typed while that line is still running
+
+  assert.strictEqual(call.openai.ofType('response.cancel').length, 0, 'the model was cancelled');
+  assert.strictEqual(
+    call.openai.ofType('response.create').length,
+    before,
+    'a second response was created while one was running',
+  );
+  // The obsolete audio is dropped so the caller stops hearing the old question.
+  assert.ok(call.twilio.ofEvent('clear').length > 0, 'the stale line kept playing');
+
+  // Once that line finishes, the read-back goes out.
+  call.openai.emit('message', JSON.stringify({ type: 'response.done', response: { id: 'r_question', output: [] } }));
+  const spoken = call.openai.ofType('response.create').map((m) => m.response.instructions).join(' ');
+  assert.match(spoken, /Is that right/i, 'the read-back never went out');
+});
+
 t('the mic opens on the tail of the line, not after its last byte', () => {
   // People answer on the last syllable. A mic that waited for the final mark clipped
   // the front of the reply or lost it, and the caller repeated themselves into a bot

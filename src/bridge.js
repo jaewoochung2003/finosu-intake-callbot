@@ -160,6 +160,10 @@ function handleCall(twilioWs, opts = {}) {
   // ours. Everything else the model generates is heard by nobody.
   const instructed = new Set();
   let awaitingInstructed = false;
+  // The response playing right now, and a line waiting for it to finish. The API
+  // refuses a second response while one is running.
+  let currentResponseId = null;
+  let queuedLine = null;
   let uninstructedFrames = 0;
 
   const openaiWs = openWebSocket(
@@ -177,9 +181,30 @@ function handleCall(twilioWs, opts = {}) {
   // Ask the model to say a specific line next. Used for the greeting, for keypad
   // confirmations, and for the closing line, all of which originate on this side.
   const speak = (line, { cancelFirst = false } = {}) => {
-    // Cancelling when nothing is generating is an error back from the API on every
-    // turn, which buries the log lines that matter under noise.
-    if (cancelFirst && responseActive) toOpenai({ type: 'response.cancel' });
+    // Replacing the line the bot is in the middle of, without cancelling it.
+    //
+    // Cancelling is what wrecked typing. A caller entering a routing number while the
+    // question was still playing hit the ninth digit, the read-back was spoken with
+    // cancelFirst, and the model treated being cut off as something to recover from
+    // and wrote itself extra lines. The first keypress stopped cancelling a while ago;
+    // the commit still did it, which is the half of the turn where the caller is
+    // typing fastest.
+    //
+    // So the obsolete line is silenced rather than cancelled: drop what the carrier has
+    // queued and take the response off the played list, and it finishes generating
+    // into a channel nobody hears. The API refuses a second response while one is
+    // running, which is the only reason the cancel was there, so the new line waits for
+    // response.done instead of racing it.
+    if (cancelFirst) {
+      if (streamSid) toTwilio({ event: 'clear', streamSid });
+      markQueue = [];
+      queuedBytes = 0;
+      if (currentResponseId) instructed.delete(currentResponseId);
+    }
+    if (responseActive) {
+      queuedLine = line;
+      return;
+    }
     awaitingInstructed = true;
     // Word for word, not "in your own voice." Every line here is already written to
     // be spoken, and the paraphrase latitude let the model drop the "Is that right?"
@@ -236,9 +261,12 @@ function handleCall(twilioWs, opts = {}) {
         // lookup and the line about seeing a document came from. The tool call in the
         // automatic response is load-bearing, so it cannot be switched off; its audio
         // is simply not played.
-        if (awaitingInstructed && msg.response && msg.response.id) {
-          instructed.add(msg.response.id);
-          awaitingInstructed = false;
+        if (msg.response && msg.response.id) {
+          currentResponseId = msg.response.id;
+          if (awaitingInstructed) {
+            instructed.add(msg.response.id);
+            awaitingInstructed = false;
+          }
         }
         break;
 
@@ -359,6 +387,13 @@ function handleCall(twilioWs, opts = {}) {
 
       case 'response.done': {
         responseActive = false;
+        currentResponseId = null;
+        // A line that arrived while this one was running goes out now.
+        if (queuedLine !== null) {
+          const next = queuedLine;
+          queuedLine = null;
+          speak(next);
+        }
         if (msg.response && msg.response.id) instructed.delete(msg.response.id);
         if (uninstructedFrames) {
           log(session.callSid, 'muted', uninstructedFrames, 'frames the model spoke unprompted');
