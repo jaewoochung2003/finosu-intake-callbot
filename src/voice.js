@@ -82,15 +82,16 @@ const TTS_STYLE_SPELLED =
     'run them together and do not read them as a word. Speak the rest of the ' +
     'sentence at a normal pace.';
 
-// A read-back spells its value out as single characters with a gap between each, a
-// shape no ordinary sentence has. Three in a row is enough to recognise it and not
+// A read-back spells its value out as single characters with something between each,
+// a shape no ordinary sentence has. Three in a row is enough to recognise it and not
 // enough for "a b" in ordinary text to trip it.
 //
-// The gap is written as three dots, so the character is followed by a full stop
-// rather than by a space. Matching only on whitespace stopped recognising read-backs
-// the moment the separator changed, and every one of them went out at the pace of an
-// ordinary question, which is the pace they exist to avoid.
-const SPELLED_OUT = /(?:(?:^|[\s.]+)[A-Za-z0-9](?=[\s.])){3,}/;
+// Any run of non-alphanumeric characters counts as the separator, deliberately. This
+// test has been broken twice by the separator changing under it — once to three dots,
+// once to a comma — and each time every read-back quietly went out at the pace of an
+// ordinary question, which is the one pace they exist to avoid. What makes a line a
+// read-back is single characters standing alone, not which mark stands between them.
+const SPELLED_OUT = /(?:(?:^|[^A-Za-z0-9]+)[A-Za-z0-9](?=[^A-Za-z0-9])){3,}/;
 const styleFor = (text) => (SPELLED_OUT.test(text) ? TTS_STYLE_SPELLED : TTS_STYLE_PLAIN);
 
 // The rate the speech endpoint returns raw samples at, and the rate a phone line runs

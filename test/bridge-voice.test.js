@@ -181,7 +181,7 @@ t('the read-back is spoken whole, question and all', async () => {
   call.say('Mama');
   await sleep(10);
   const line = call.spoken[call.spoken.length - 1];
-  assert.match(line, /j[\s.]+o[\s.]+e[\s.]+m[\s.]+a[\s.]+m[\s.]+a/i, `no spelling: ${line}`);
+  assert.match(line, /j[^A-Za-z0-9]+o[^A-Za-z0-9]+e[^A-Za-z0-9]+m[^A-Za-z0-9]+a[^A-Za-z0-9]+m[^A-Za-z0-9]+a/i, `no spelling: ${line}`);
   assert.match(line, /is that right\?$/i, `no question on the end: ${line}`);
 });
 
@@ -211,7 +211,7 @@ t('line noise is not an answer, but is not met with silence either', async () =>
   call.say('Thank you.');
   await sleep(20);
   // Not written into the form...
-  assert.doesNotMatch(call.spoken.join(' '), /that's[\s.]+t[\s.]+h[\s.]+a[\s.]+n[\s.]+k/i, 'filler was taken as a name');
+  assert.doesNotMatch(call.spoken.join(' '), /that's[^A-Za-z0-9]+t[^A-Za-z0-9]+h[^A-Za-z0-9]+a[^A-Za-z0-9]+n[^A-Za-z0-9]+k/i, 'filler was taken as a name');
   // ...and not answered with nothing. On a live call the caller spoke, heard nothing
   // back, and sat there saying "Hello?" into a bot they could not tell from a dead
   // line.
@@ -477,12 +477,17 @@ t('a read-back goes to the engine that can be told it is a read-back', () => {
   assert.match(voice.styleFor(`That's ${V.spellWords('Joe')}.`), /each single letter or digit/i);
 });
 
-// Nothing in a spoken line may be punctuation the caller could hear as a word.
-t('spelled-out characters are separated by a space and nothing else', () => {
+// Four letters that happen to spell a word get read as the word, however clearly the
+// engine is told to spell. "y e s s" came back off a live call as "yes s" and the
+// caller could not tell what had been written down. A comma is what separates them,
+// and it has to be punctuation the engine interprets rather than punctuation it might
+// say: measured through the spelling engine, spaces 4.50s, commas 5.45s, and the extra
+// second is the gaps.
+t('spelled-out characters are separated by something the reader pauses on', () => {
   const V = require('../src/validate');
-  assert.strictEqual(V.spellWords('Joe'), 'j o e');
-  assert.strictEqual(V.spellDigits('021'), '0 2 1');
-  assert.strictEqual(V.spellEmail('zoey@gmail.com'), 'z o e y, at gmail dot com');
+  assert.strictEqual(V.spellWords('Joe'), 'j, o, e');
+  assert.strictEqual(V.spellDigits('021'), '0, 2, 1');
+  assert.strictEqual(V.spellEmail('yess@gmail.com'), 'y, e, s, s, at gmail dot com');
 });
 
 // And the line still has to be recognised as a read-back afterwards. It was not: the
@@ -552,4 +557,25 @@ t('a spoken note is a sentence, not an instruction to whoever is reading it', ()
   const income = V.validateMonthlyIncome('two thousand a month', 'Monthly');
   assert.ok(income.ok);
   assert.match(income.note, /^Got it,/, `the caller hears: ${income.note}`);
+});
+
+// Which mark stands between the characters has changed three times, and twice it
+// silently stopped every read-back being recognised as one, so they all went out at
+// the pace of an ordinary question. What makes a line a read-back is single characters
+// standing alone, whatever is between them.
+t('a read-back is recognised whatever separates the characters', () => {
+  for (const sep of [' ', ', ', '... ', ' - ', '. ']) {
+    const line = `Okay, ${'021000021'.split('').join(sep)}. Is that right?`;
+    assert.strictEqual(voice.modelFor(line), 'gpt-4o-mini-tts', `missed with "${sep}"`);
+  }
+  // And an ordinary line is not one, whatever it contains.
+  for (const line of [
+    'Got it, 473. And the city?',
+    'Is that a yes?',
+    'Got it, Vienna. And the state?',
+    'Got it, (240) 278-6143. What is your work situation right now?',
+    'Got it, about 2,000 dollars a month. Are you active duty military right now?',
+  ]) {
+    assert.strictEqual(voice.modelFor(line), 'tts-1', `wrongly read back: ${line}`);
+  }
 });

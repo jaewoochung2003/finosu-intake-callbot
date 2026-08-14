@@ -419,7 +419,7 @@ t('regression: the read-back spells the part before the at sign', () => {
   const line = SCRIPTS.FIELD_BY_KEY
     ? null
     : require('../src/fields').BY_KEY.email.confirmLine(r.value);
-  assert.match(line, /j[\s.]+a[\s.]+e[\s.]+w[\s.]+o[\s.]+o[\s.]+c[\s.]+h[\s.]+u[\s.]+n[\s.]+g[\s.]+2[\s.]+0[\s.]+0[\s.]+3/);
+  assert.match(line, /j[^A-Za-z0-9]+a[^A-Za-z0-9]+e[^A-Za-z0-9]+w[^A-Za-z0-9]+o[^A-Za-z0-9]+o[^A-Za-z0-9]+c[^A-Za-z0-9]+h[^A-Za-z0-9]+u[^A-Za-z0-9]+n[^A-Za-z0-9]+g[^A-Za-z0-9]+2[^A-Za-z0-9]+0[^A-Za-z0-9]+0[^A-Za-z0-9]+3/);
   // the domain is not spelled; nobody mishears gmail
   assert.match(line, /at gmail dot com/);
 });
@@ -436,7 +436,7 @@ t('regression: the name read-back spells every letter, and hides the spacing', (
   };
   // a stray space is inaudible: one run of letters, no pause to correct
   assert.strictEqual(spelled('Jae Woo Chung'), spelled('Jaewoo Chung'));
-  assert.match(spelled('Jaewoo Chung'), /j[\s.]+a[\s.]+e[\s.]+w[\s.]+o[\s.]+o[\s.]+c[\s.]+h[\s.]+u[\s.]+n[\s.]+g/);
+  assert.match(spelled('Jaewoo Chung'), /j[^A-Za-z0-9]+a[^A-Za-z0-9]+e[^A-Za-z0-9]+w[^A-Za-z0-9]+o[^A-Za-z0-9]+o[^A-Za-z0-9]+c[^A-Za-z0-9]+h[^A-Za-z0-9]+u[^A-Za-z0-9]+n[^A-Za-z0-9]+g/);
   // a wrong letter is audible
   assert.ok(!/j a e w o o c h u n g/.test(spelled('Jaywoo Chung')));
 });
@@ -475,12 +475,12 @@ t('regression: a name is read back spelled, and a no asks for a spelling', () =>
   const s = intake.startSession({ callSid: 'reg' });
   intake.submit(s, 'Jae Woo');
   const first = intake.submit(s, 'chung');
-  assert.match(first.say, /Okay, Jae Woo Chung\. That's[\s.]+j[\s.]+a[\s.]+e[\s.]+w[\s.]+o[\s.]+o[\s.]+c[\s.]+h[\s.]+u[\s.]+n[\s.]+g\. Is that right\?/);
+  assert.match(first.say, /Okay, Jae Woo Chung\. That's[^A-Za-z0-9]+j[^A-Za-z0-9]+a[^A-Za-z0-9]+e[^A-Za-z0-9]+w[^A-Za-z0-9]+o[^A-Za-z0-9]+o[^A-Za-z0-9]+c[^A-Za-z0-9]+h[^A-Za-z0-9]+u[^A-Za-z0-9]+n[^A-Za-z0-9]+g\. Is that right\?/);
   const after = intake.submit(s, 'no');
   assert.match(after.say, /Spell your first name/);
   intake.submit(s, 'j a e w o o');
   const second = intake.submit(s, 'c h u n g');
-  assert.match(second.say, /That's[\s.]+j[\s.]+a[\s.]+e[\s.]+w[\s.]+o[\s.]+o[\s.]+c[\s.]+h[\s.]+u[\s.]+n[\s.]+g/);
+  assert.match(second.say, /That's[^A-Za-z0-9]+j[^A-Za-z0-9]+a[^A-Za-z0-9]+e[^A-Za-z0-9]+w[^A-Za-z0-9]+o[^A-Za-z0-9]+o[^A-Za-z0-9]+c[^A-Za-z0-9]+h[^A-Za-z0-9]+u[^A-Za-z0-9]+n[^A-Za-z0-9]+g/);
   // and the correction reached the form, not just the read-back
   intake.submit(s, 'yes');
   assert.strictEqual(s.record.name, 'Jaewoo Chung');
