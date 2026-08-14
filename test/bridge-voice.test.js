@@ -579,3 +579,43 @@ t('a read-back is recognised whatever separates the characters', () => {
     assert.strictEqual(voice.modelFor(line), 'tts-1', `wrongly read back: ${line}`);
   }
 });
+
+// "J-O-E Mama" went onto a form. Asked to spell a name — which the bot does itself,
+// on the path a caller reaches by saying the first read-back was wrong — the caller
+// says the letters and the transcriber writes them the way English writes a spelled
+// word. The run logic pulled apart "j a e w o o" but never saw "J-O-E", because that
+// is one token.
+t('a name spelled with hyphens is the name, not the hyphens', () => {
+  const P = require('../src/parse');
+  assert.strictEqual(P.parseName('J-O-E.'), 'Joe');
+  assert.strictEqual(P.parseName('J-O-E'), 'Joe');
+  assert.strictEqual(P.parseName('j.o.e.'), 'Joe');
+  assert.strictEqual(P.parseName('C-H-U-N-G'), 'Chung');
+  assert.strictEqual(P.parseName('j a e w o o'), 'Jaewoo');
+  // Real hyphens have a word on at least one side and stay. Two single letters are a
+  // pair of initials, not a spelling, or "J R" joins to "Jr" and reads as Junior.
+  assert.strictEqual(P.parseName('Mary-Jane'), 'Mary-Jane');
+  assert.strictEqual(P.parseName('Jean-Luc Picard'), 'Jean-Luc Picard');
+  assert.strictEqual(P.parseName('J-R'), 'J-R');
+  assert.strictEqual(P.parseName('J R Smith'), 'J R Smith');
+  assert.strictEqual(P.parseName('Malcolm X.'), 'Malcolm X');
+  // Whatever the transcriber puts between the letters.
+  assert.strictEqual(P.parseName('J - O - E'), 'Joe');
+  assert.strictEqual(P.parseName('J. O. E.'), 'Joe');
+  // Two names spelled in one breath need the pause the caller made between them.
+  // Without it there is nothing in the text to say where one ends.
+  assert.strictEqual(P.parseName('J-O-E, M-A-M-A'), 'Joe Mama');
+});
+
+// The same shape reaches five other fields, and each has its own reader. This is the
+// check that the fix is not just about the one field it was found on.
+t('a spelled answer works on every field that takes one', () => {
+  const P = require('../src/parse');
+  assert.strictEqual(P.parseEmail('j-o-e at gmail dot com'), 'joe@gmail.com');
+  assert.strictEqual(P.parseEmail('J-O-E-Y at gmail.com'), 'joey@gmail.com');
+  // A dot between letters is ordinary in an address and is left alone.
+  assert.strictEqual(P.parseEmail('first.last at gmail dot com'), 'first.last@gmail.com');
+  assert.strictEqual(P.spokenDigits('0-2-1-0-0-0-0-2-1'), '021000021');
+  assert.strictEqual(P.spokenDigits('4-8-2-1'), '4821');
+  assert.strictEqual(P.parseState('V-A'), 'VA');
+});

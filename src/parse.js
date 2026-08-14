@@ -947,6 +947,22 @@ function parseEnum(text, options, synonyms = {}) {
 // ("J Robert Smith") is not a run, so it survives.
 function joinSpelledRuns(text) {
   return String(text)
+    // "J-O-E" is one token, not three, so the run logic below never saw it.
+    //
+    // Asked to spell a name, the caller says the letters and the transcriber writes
+    // them the way English writes a spelled word: hyphenated. Nothing pulled them
+    // apart, so the form said "J-O-E Mama" — and the bot had asked for the spelling
+    // itself, on the path a caller reaches by saying the first read-back was wrong.
+    // The same thing on an email address was fixed a commit earlier; this is the half
+    // that was missed.
+    //
+    // Three or more single letters joined by hyphens or full stops become the same
+    // letters spaced apart, and the run logic below joins them from there. Three and
+    // not two for the reason given above: "J-R" is a pair of initials.
+    .replace(
+      /(^|[^A-Za-z0-9])([A-Za-z](?:[-.][A-Za-z]){2,})(?![A-Za-z0-9])/g,
+      (_, before, run) => before + run.replace(/[-.]/g, ' '),
+    )
     .split(/[,;]|\band\b/i)
     .map((chunk) => {
       const parts = chunk.trim().split(/\s+/).filter(Boolean);
@@ -961,7 +977,16 @@ function joinSpelledRuns(text) {
         run = [];
       };
       for (const p of parts) {
-        if (/^[A-Za-z]$/.test(p)) run.push(p);
+        // A letter with a full stop or comma stuck to it is still a letter. "J-O-E."
+        // ends in the full stop that ends the sentence, and requiring a bare letter
+        // meant the last one of the run was not counted: three letters read as two,
+        // which is the pair-of-initials case, and the spelling stayed apart.
+        // A lone dash between the letters is part of the spelling, not a token in it.
+        // "J - O - E" with spaces around the hyphens broke the run into single letters
+        // with punctuation between, and the run never reached three.
+        if (/^[-.]+$/.test(p)) continue;
+        const letter = /^([A-Za-z])[.,]?$/.exec(p);
+        if (letter) run.push(letter[1]);
         else {
           flush();
           out.push(p);
