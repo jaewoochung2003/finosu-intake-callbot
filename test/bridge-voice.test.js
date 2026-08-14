@@ -495,3 +495,47 @@ t('a read-back is still recognised as one after the separator changed', () => {
   assert.strictEqual(voice.speedFor(`That's ${V.spellWords('Joe Mama')}.`), voice.TTS_SPEED_SPELLED);
   assert.strictEqual(voice.speedFor('Got it, Vienna. And the state?'), voice.TTS_SPEED_PLAIN);
 });
+
+// ---------- "are you still there?" ----------
+//
+// A caller who goes quiet is asked whether they are there. The question they went
+// quiet on is still the open one, so their "yes" was fed to it: on a street address
+// it failed validation and burned an attempt, and on a yes-or-no knockout it would
+// have declined somebody who only meant they had not hung up.
+t('the nudge asks the question again, not just whether anyone is there', async () => {
+  const call = startCall({ quietNudgeMs: 60, quietEndMs: 5000 });
+  await sleep(10);
+  call.linePlayed();
+  await sleep(140);
+  const nudge = call.spoken[call.spoken.length - 1];
+  assert.match(nudge, /still there/i, `no nudge: ${JSON.stringify(call.spoken)}`);
+  assert.match(nudge, /first name/i, 'the caller was left with nothing to answer');
+});
+
+t('a yes to the nudge is presence, not an answer to the open question', async () => {
+  const call = startCall({ quietNudgeMs: 60, quietEndMs: 5000 });
+  await sleep(10);
+  call.linePlayed();
+  await sleep(140);
+  const before = call.spoken.length;
+  call.say('yes');
+  await sleep(20);
+  // Not filed: the name question is still open.
+  assert.strictEqual(call.spoken.length, before + 1, `spoke: ${JSON.stringify(call.spoken.slice(before))}`);
+  assert.match(call.spoken[before], /first name/i, 'the yes was filed as the answer');
+  assert.doesNotMatch(call.spoken[before], /last name/i, 'the yes was accepted as a first name');
+});
+
+// And the other direction: outside a nudge, a bare yes is an ordinary answer and has
+// to reach the question that asked for one.
+t('a yes with no nudge open is an ordinary answer', async () => {
+  const call = startCall();
+  await sleep(10);
+  call.say('Joe');
+  await sleep(20);
+  call.say('Mama');
+  await sleep(20);
+  call.say('yes');
+  await sleep(20);
+  assert.match(call.spoken[call.spoken.length - 1], /email/i, 'the read-back never took its yes');
+});

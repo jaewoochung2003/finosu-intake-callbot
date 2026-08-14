@@ -76,7 +76,19 @@ const PAY_FREQUENCY_SYNONYMS = {
   'every month': 'Monthly',
 };
 
-const EMPLOYMENT_STATUSES = ['Employed', 'Self-employed', 'Unemployed', 'Retired', 'Student'];
+// Student is not one of them any more, and a caller who says it is recorded as
+// Unemployed.
+//
+// It was a status with no income and no pay cycle behind it, so a student was walked
+// into the pay questions, had no answer among the four, and had to find the wording
+// that meant "none" before the call could go on. The record that came out said
+// Student with an empty cadence and no wage, which is what Unemployed already means
+// and already handles: the pay, income and employer questions skip, the income slots
+// are filled with zero, and the decision is the same one either way.
+//
+// A student with a job answers with the job. That is the case the status was there
+// for and it is better served by the question than by an option.
+const EMPLOYMENT_STATUSES = ['Employed', 'Self-employed', 'Unemployed', 'Retired'];
 
 const EMPLOYMENT_SYNONYMS = {
   'full time': 'Employed',
@@ -108,7 +120,17 @@ const EMPLOYMENT_SYNONYMS = {
   'jobless': 'Unemployed',
   'retired': 'Retired',
   'on disability': 'Unemployed',
-  'in school': 'Student',
+  // Being at school is not a job. A student earning something says so and lands on
+  // Employed or Self-employed through the entries above.
+  'in school': 'Unemployed',
+  'at school': 'Unemployed',
+  'student': 'Unemployed',
+  'students': 'Unemployed',
+  'college': 'Unemployed',
+  'university': 'Unemployed',
+  'full time student': 'Unemployed',
+  'grad student': 'Unemployed',
+  'graduate student': 'Unemployed',
 };
 
 const FIELDS = [
@@ -211,15 +233,14 @@ const FIELDS = [
     label: 'Employment Status',
     group: 'Employment',
     ask: "What's your work situation right now?",
-    reask: 'Working, self-employed, unemployed, retired, or a student?',
+    reask: 'Working, self-employed, unemployed, or retired?',
     knockout: true,
     // Someone out of work has no salary and no employer, so the pay, income and
     // employer questions below skip on this value (appliesWhen on each). The two
     // income slots the decision needs are filled here instead of asked: no wages is a
     // monthly income of 0, which is under the line, so the record shows both
     // NOT_EMPLOYED and INCOME_BELOW_2000 without ever asking an out-of-work caller
-    // how much they earn. Retired and Student still get asked — a pension or a
-    // part-time job can clear the line.
+    // how much they earn. Retired still gets asked — a pension can clear the line.
     derive: (v) => (v === 'Unemployed' ? { monthly_income: 0, income_over_2000: false } : {}),
     validate: (said) => V.validateEnum(said, EMPLOYMENT_STATUSES, EMPLOYMENT_SYNONYMS),
   },

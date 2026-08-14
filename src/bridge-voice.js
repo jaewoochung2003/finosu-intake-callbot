@@ -71,6 +71,15 @@ const joinFrames = (frames) =>
 const MAX_SPEAK_MS = 30000;
 const CLOSE_MAX_MS = 15000;
 
+// What a caller says to "are you still there?" and means nothing else by.
+//
+// Whole and on its own: "yes" is this, "yes, checking" is an answer that happens to
+// start with one. Filed as an answer it would go into whichever question was open,
+// and on a yes-or-no knockout that is a decline for somebody who only meant they had
+// not hung up.
+const IM_STILL_HERE =
+  /^(yes|yeah|yep|yup|uh huh|hello|hi|hey|sorry|i'?m here|im here|still here|i am here|i'?m still here|here|what|pardon|say that again|one moment|hold on|hang on|give me a second|just a second|sorry about that)[\s.,!?]*$/i;
+
 
 // What speech recognition writes when it is handed silence or line hiss. Whisper
 // produces these with no audible speech anywhere in the audio, and one of them was
@@ -393,6 +402,10 @@ function handleCall(twilioWs, opts = {}) {
         const said = String(msg.transcript || '').trim();
         transcriptAt = Date.now();
         lastActivity = Date.now();
+        // Read before it is cleared. Whether a nudge was outstanding is the whole of
+        // what decides if this turn is an answer or just proof the line is alive, and
+        // clearing the flag first threw that away.
+        const answeringTheNudge = nudged;
         nudged = false;
         if (!said) break;
         if (isNotSpeech(said)) {
@@ -431,6 +444,19 @@ function handleCall(twilioWs, opts = {}) {
         // knockout questions in a row and both are real, so identical words are not
         // proof of anything — and the split that caused this returned "Mama" once in
         // Cyrillic and once in Latin, which are not identical words at all.
+
+        // "Yes, I'm here" is an answer to "are you still there?" and to nothing else.
+        //
+        // Filed as an answer it goes into whichever question was open, and on a
+        // yes-or-no knockout that is a decline for a caller who only meant they had
+        // not hung up. So it is taken as what it is: proof the line is alive, and the
+        // question asked again.
+        if (answeringTheNudge && IM_STILL_HERE.test(said)) {
+          log(session.callSid, 'the caller is still there');
+          say(intake.openPrompt(session));
+          break;
+        }
+
         const openNow = (intake.currentField(session) || {}).key || '';
         if (heardSinceLine && openNow !== lastAnsweredField) {
           log(
@@ -529,7 +555,11 @@ function handleCall(twilioWs, opts = {}) {
       if (!nudged && quiet > quietNudgeMs) {
         nudged = true;
         lastActivity = Date.now();
-        say('Are you still there?');
+        // The question goes with it. On its own, "Are you still there?" leaves a
+        // caller who went quiet because they did not catch the question with nothing
+        // to answer, so they say "yes" and the call sits exactly where it was. Asking
+        // again is what they went quiet for.
+        say(`Are you still there? ${intake.openPrompt(session)}`);
         return;
       }
       if (nudged && quiet > quietEndMs - quietNudgeMs) {
