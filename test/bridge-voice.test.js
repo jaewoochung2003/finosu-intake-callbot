@@ -736,3 +736,127 @@ t('every question the form asks is on the list of fixed lines', () => {
     if (field.reask) assert.ok(lines.includes(field.reask), `${field.key} reask is not warmed`);
   }
 });
+
+// The call of 13 Aug that went quiet after the income question.
+//
+// fetch has no timeout of its own. A request to the speech endpoint never returned,
+// so the line was never spoken, the queue every later line waits on never settled,
+// and — because an outstanding line also holds the microphone shut and stands the
+// quiet watch down — the caller said "hello" into a line that could not hear him and
+// would not have answered. 25 seconds, then he hung up. Nothing in the log, because
+// nothing failed.
+t('a speech request that never answers is dropped and tried again', async () => {
+  const realFetch = global.fetch;
+  const timeout = process.env.TTS_TIMEOUT_MS;
+  process.env.TTS_TIMEOUT_MS = '120';
+  let calls = 0;
+  // The first attempt hangs until it is aborted. The second answers.
+  global.fetch = (url, init) =>
+    new Promise((resolve, reject) => {
+      calls += 1;
+      const mine = calls;
+      if (init && init.signal) {
+        init.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      }
+      if (mine > 1) {
+        resolve({
+          ok: true,
+          body: (async function* () {
+            yield Buffer.alloc(voice.FRAME_BYTES * 2 * 3);
+          })(),
+        });
+      }
+    });
+  try {
+    const frames = [];
+    const started = Date.now();
+    for await (const f of voice.speechStream('A line nobody can say.', { apiKey: 'x' })) frames.push(f);
+    assert.strictEqual(calls, 2, 'the hung request was not retried');
+    assert.ok(frames.length > 0, 'the retry produced no audio');
+    assert.ok(Date.now() - started < 5000, 'the hung request was waited on far too long');
+  } finally {
+    global.fetch = realFetch;
+    if (timeout === undefined) delete process.env.TTS_TIMEOUT_MS;
+    else process.env.TTS_TIMEOUT_MS = timeout;
+  }
+});
+
+// One retry, not a loop. A line that cannot be made has to fail so the caller is
+// heard again, rather than holding the queue for the rest of the call.
+t('a speech request that never answers twice gives up', async () => {
+  const realFetch = global.fetch;
+  const timeout = process.env.TTS_TIMEOUT_MS;
+  process.env.TTS_TIMEOUT_MS = '120';
+  let calls = 0;
+  global.fetch = (url, init) =>
+    new Promise((resolve, reject) => {
+      calls += 1;
+      if (init && init.signal) {
+        init.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      }
+    });
+  try {
+    let threw = null;
+    try {
+      for await (const f of voice.speechStream('A line nobody can say.', { apiKey: 'x' })) void f;
+    } catch (e) {
+      threw = e;
+    }
+    assert.ok(threw, 'a line that could never be made resolved as if it had been');
+    assert.strictEqual(calls, 2, 'it did not stop at one retry');
+  } finally {
+    global.fetch = realFetch;
+    if (timeout === undefined) delete process.env.TTS_TIMEOUT_MS;
+    else process.env.TTS_TIMEOUT_MS = timeout;
+  }
+});
+
+// The microphone cannot be held shut by a line that is not producing any sound. This
+// is the half of the 13 Aug call that made it unrecoverable: not that the line was
+// missing, but that the caller could not be heard while it was missing.
+t('a line that produces no audio stops holding the microphone shut', async () => {
+  const twilio = new FakeSocket();
+  const openai = new FakeSocket();
+  const grace = process.env.FETCH_GRACE_MS;
+  process.env.FETCH_GRACE_MS = '300';
+  handleCall(twilio, {
+    openaiApiKey: 'test',
+    openWebSocket: () => openai,
+    deliver: async () => ({ sent: true }),
+    callsDir: fs.mkdtempSync(path.join(os.tmpdir(), 'callbot-stuck-')),
+    // The greeting's audio never arrives, which is what a hung request looks like
+    // from in here.
+    speak: () => (async function* () { await sleep(60000); })(),
+  });
+  openai.emit('open');
+  twilio.emit(
+    'message',
+    JSON.stringify({
+      event: 'start',
+      start: { streamSid: 'MZstuck', callSid: 'CAstuck', customParameters: { from: '+16508629110' } },
+      streamSid: 'MZstuck',
+    }),
+  );
+  const callerSpeaks = () =>
+    twilio.emit(
+      'message',
+      JSON.stringify({ event: 'media', streamSid: 'MZstuck', media: { payload: 'AAAA' } }),
+    );
+  const reached = () => openai.ofType('input_audio_buffer.append').length;
+
+  try {
+    await sleep(20);
+    callerSpeaks();
+    assert.strictEqual(reached(), 0, 'the caller was heard over a line that was still starting');
+
+    // Past the grace, with not one frame produced, the bot is not speaking whatever
+    // the counter says, and the caller has to get through.
+    await sleep(500);
+    callerSpeaks();
+    assert.ok(reached() > 0, 'a line that never produced a frame kept the caller unheard');
+  } finally {
+    if (grace === undefined) delete process.env.FETCH_GRACE_MS;
+    else process.env.FETCH_GRACE_MS = grace;
+    twilio.emit('message', JSON.stringify({ event: 'stop', streamSid: 'MZstuck', stop: {} }));
+  }
+});

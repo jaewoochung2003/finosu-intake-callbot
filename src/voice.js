@@ -386,13 +386,42 @@ function pcm24kToMulaw8k(pcm) {
 
 // ---------- the line ----------
 
+// How long to wait for the endpoint before giving up on a request.
+//
+// fetch has no timeout of its own, so a request that never answers never ends. On a
+// call on 13 Aug one hung after the income question: the line was never spoken, the
+// promise every later line was queued behind never settled, and because an
+// outstanding line also holds the microphone shut and stands the quiet watch down,
+// the caller sat in silence for 25 seconds and hung up. Nothing in the log, because
+// nothing failed — it simply never returned.
+//
+// First byte normally arrives in 0.3 to 2.3 seconds, so six is late by any measure
+// and still short enough that a retry beats waiting. The second timer covers the
+// stream going quiet halfway through, which is the same failure with the headers
+// already sent.
+const ttsTimeoutMs = () => Number(process.env.TTS_TIMEOUT_MS || 6000);
+const ttsStallMs = () => Number(process.env.TTS_STALL_MS || 5000);
+
+// One request, with a clock on it. The caller drives the clock: touch() on every
+// chunk that arrives, done() when the body ends, abort() to drop it unread.
 function request(text, { apiKey = process.env.OPENAI_API_KEY, signal } = {}) {
-  return fetch(SPEECH_URL, {
+  const control = new AbortController();
+  let timer = null;
+  const stop = (ms, why) => {
+    clearTimeout(timer);
+    if (ms) timer = setTimeout(() => control.abort(new Error(why)), ms);
+  };
+  const first = ttsTimeoutMs();
+  stop(first, `the speech endpoint sent nothing in ${first} ms`);
+  if (signal) signal.addEventListener('abort', () => control.abort(), { once: true });
+
+  const response = fetch(SPEECH_URL, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
+    signal: control.signal,
     body: JSON.stringify({
       model: modelFor(text),
       voice: TTS_VOICE,
@@ -406,8 +435,19 @@ function request(text, { apiKey = process.env.OPENAI_API_KEY, signal } = {}) {
       // have to be decoded here first.
       response_format: 'pcm',
     }),
-    signal,
   });
+  // Headers arriving only means the endpoint answered; the body can still stall.
+  response.then(() => stop(ttsStallMs(), `the speech stream stopped for ${ttsStallMs()} ms`)).catch(() => {});
+  return {
+    text,
+    response,
+    touch: () => stop(ttsStallMs(), `the speech stream stopped for ${ttsStallMs()} ms`),
+    done: () => stop(0),
+    abort: () => {
+      stop(0);
+      control.abort();
+    },
+  };
 }
 
 // One line of speech, as base64 frames, yielded as they come off the wire.
@@ -421,10 +461,11 @@ function request(text, { apiKey = process.env.OPENAI_API_KEY, signal } = {}) {
 // Two remainders are carried across chunks: input bytes that do not divide into whole
 // groups of three samples, and output bytes that do not fill a 20 ms frame. Dropping
 // either one puts a click in the audio at every chunk boundary.
-async function* framesOf(pending) {
-  const res = await pending;
+async function* framesOf(req) {
+  const res = await req.response;
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
+    req.done();
     throw new Error(`speech ${res.status}: ${detail.slice(0, 200)}`);
   }
   const resample = makeResampler();
@@ -433,6 +474,8 @@ async function* framesOf(pending) {
   let bytes = 0;
 
   for await (const chunk of res.body) {
+    // The stream is alive, so the clock that would abort it starts again.
+    req.touch();
     // Whole samples only: a chunk can end in the middle of one, and reading half a
     // sample as a whole one puts a spike in the audio.
     const buf = Buffer.concat([pcmCarry, Buffer.from(chunk)]);
@@ -454,6 +497,7 @@ async function* framesOf(pending) {
     yield last.toString('base64');
     bytes += FRAME_BYTES;
   }
+  req.done();
   return bytes / PHONE_RATE;
 }
 
@@ -475,13 +519,14 @@ async function* speechStream(text, opts = {}) {
       ? [...splitOpener(split[0]).map((p) => ({ ...p, ready: warmed.get(p.text) || null })), ...split.slice(1)]
       : split;
   // The rejection is caught here so an unawaited request cannot take the process
-  // down; awaiting the same promise below still throws, which is where it is handled.
-  const inflight = parts.map((part) => {
+  // down; awaiting the same one below still throws, which is where it is handled.
+  const start = (part) => {
     if (part.ready) return null;
-    const pending = request(part.text, opts);
-    pending.catch(() => {});
-    return pending;
-  });
+    const req = request(part.text, opts);
+    req.response.catch(() => {});
+    return req;
+  };
+  const inflight = parts.map(start);
 
   try {
     for (let i = 0; i < parts.length; i++) {
@@ -490,15 +535,27 @@ async function* speechStream(text, opts = {}) {
         yield* ready;
         continue;
       }
-      yield* framesOf(inflight[i]);
+      let sent = 0;
+      try {
+        for await (const frame of framesOf(inflight[i])) {
+          sent += 1;
+          yield frame;
+        }
+      } catch (e) {
+        // One more attempt, and only while nothing has reached the caller yet. Past
+        // the first frame a second take would repeat audio they have already heard,
+        // in a different reading of the line, halfway through a sentence. A request
+        // that timed out with nothing to show is usually one that would have worked.
+        if (sent) throw e;
+        inflight[i] = start(parts[i]);
+        yield* framesOf(inflight[i]);
+      }
       inflight[i] = null;
     }
   } finally {
     // A caller who hangs up mid-line, or a piece that failed, leaves the rest of the
-    // line's audio arriving at a socket nobody is reading. Close them.
-    for (const pending of inflight) {
-      if (pending) pending.then((res) => res.body && res.body.destroy && res.body.destroy()).catch(() => {});
-    }
+    // line arriving at a socket nobody is reading, and a timer holding the process.
+    for (const req of inflight) if (req) req.abort();
   }
 }
 

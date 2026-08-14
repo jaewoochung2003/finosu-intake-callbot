@@ -80,6 +80,11 @@ const joinFrames = (frames) =>
 // A line that never finishes playing must not hold the microphone shut for the rest
 // of the call. Longer than the greeting, which is the longest thing the bot says.
 const MAX_SPEAK_MS = 30000;
+// How long a line may produce no sound at all before the caller is heard again.
+// Longer than the speech endpoint's timeout plus its one retry, so a line that is
+// merely slow is not cut off, and far shorter than MAX_SPEAK_MS, which assumes a line
+// that is playing.
+const fetchGraceMs = () => Number(process.env.FETCH_GRACE_MS || 14000);
 const CLOSE_MAX_MS = 15000;
 
 // What a caller says to "are you still there?" and means nothing else by.
@@ -259,11 +264,20 @@ function handleCall(twilioWs, opts = {}) {
   // reports go missing cannot leave the caller unheard for the rest of the call.
   const stillSpeaking = () => {
     if (Date.now() - speakingSince > MAX_SPEAK_MS) return false;
-    // A line that has been decided on but whose audio is still being fetched counts
-    // as speaking. Frames alone did not cover it: for the second or so between the
-    // server writing a line and the first frame coming back there are no frames at
-    // all, the microphone read as open, and anything the caller said in that gap was
+    // A line decided on but still being fetched counts as speaking, up to a point.
+    //
+    // Frames alone did not cover it: for the second or so between the server writing
+    // a line and the first frame coming back there are no frames at all, the
+    // microphone read as open, and anything the caller said in that gap was
     // transcribed as the answer to a question they had not been asked yet.
+    //
+    // The point is here. `speakingSince` moves on every batch sent, so on a line that
+    // is playing it stays fresh; on a line whose audio never arrives it stays at the
+    // moment the line was written. When nothing has gone out for FETCH_GRACE_MS the
+    // bot is not speaking, whatever the counter says, and the caller has to be heard
+    // again — on 13 Aug a request that never returned left one saying "hello" into a
+    // line that could not hear him and would not have answered.
+    if (unplayedBatches === 0 && Date.now() - speakingSince > fetchGraceMs()) return false;
     return linesOutstanding > 0 || unplayedBatches > 0;
   };
 
