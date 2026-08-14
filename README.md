@@ -3,24 +3,39 @@
 This is a phone number you can call. The bot takes a loan application over the phone,
 runs the reject rules against the answers and emails the filled form.
 
-The audio path is speech to speech: the carrier streams the call to OpenAI's Realtime API
-and streams the reply back, both in G.711 u-law at 8 kHz, so in `bridge.js` I copy bytes
-in both directions with no resampling. The model talks and does nothing else. It holds no
-form, no field order and no lending rule. The only tool that puts anything on the form is
-`save_answer` and the next question comes back to it in the tool result. I kept the
-rules out of the model because a caller can argue a model out of a rule it holds, while a
-model holding the field order can drop a field with nothing to catch it.
+The model listens and does nothing else. It has no tools, no voice and no way to start a
+turn of its own, so what comes back from it is a transcript and nothing more. I take the
+transcript, run it through the form, then turn the next line into audio myself and send
+that to the carrier. The lending rules and the field order live in plain functions, since
+a caller can argue a model out of a rule it holds while a model holding the field order
+can drop a field with nothing to catch it.
+
+I built it the other way first, with the model speaking the lines I wrote and filing the
+answers through a tool. Over an evening of live calls it reworded lines, dropped the
+question off the end of a read-back so the caller was never asked anything, said
+sentences I had not written, skipped a question and left the caller in silence, then
+answered its own yes-or-no question before the caller had made a sound. None of that was
+disobedience. A model handed a turn produces a plausible continuation of the
+conversation; after "is that right?" the plausible continuation is "yes", so from
+inside the turn there is no difference between hearing an answer and an answer belonging
+there. Taking the turn away removes the whole set at once. A line cannot be reworded or
+cut short because I build the audio from the string and nothing reads it in between; a
+question cannot be skipped because I send the frames and count them; an answer cannot be
+invented because there is no tool to invent one with; and the turn cannot be taken early
+because I hold the microphone shut until the carrier reports the last frame played. It
+costs about half a second before each line and the caller cannot interrupt mid-sentence.
 
 ```
-caller ──phone──▶ Twilio ──ws (u-law)──▶ bridge.js ──ws (u-law)──▶ OpenAI Realtime
-                    │                        │
-                    │  dtmf digits           │  save_answer("four eight two one")
-                    └────────────────────────┤
-                                             ▼
-                              intake.js ─▶ validate.js ─▶ decision.js
-                                             │
-                                             ▼
-                                   email.js ─▶ your inbox
+                    ┌──── u-law frames ──── voice.js ◀── OpenAI speech
+                    ▼                          ▲
+caller ──phone──▶ carrier ──ws (u-law)──▶ bridge-voice.js ──ws──▶ OpenAI Realtime
+                                               │                  (transcription only)
+                                               │  ◀── "four eight two one"
+                                               ▼
+                                  intake.js ─▶ validate.js ─▶ decision.js
+                                               │
+                                               ▼
+                                     email.js ─▶ your inbox
 ```
 
 ---
@@ -44,7 +59,8 @@ node tools/simulate.js --script fake-routing     # a made-up routing number gets
 node tools/simulate.js --script multi-reject     # three reject reasons on one call
 node tools/simulate.js --script approved --email # actually sends the email
 
-npm test                                         # 332 checks
+npm run paths                                    # every branch of the call, with what each one decided
+npm test                                         # 399 checks
 ```
 
 ---
@@ -60,10 +76,9 @@ npm start                 # listens on :5050
 cloudflared tunnel --url http://localhost:5050
 ```
 
-Everything between the caller and the email has tests except the WebSocket to the
-Realtime API, which I wrote from the documentation, so preflight opens a live socket,
-asks for one spoken line and prints whether audio came back on the event `bridge.js`
-listens for.
+Everything between the caller and the email has tests except the two sockets, which I
+wrote from the documentation, so preflight opens a live Realtime session and checks every
+credential before a call arrives rather than after one fails.
 
 Point a number at `https://<your-tunnel-host>/incoming-call` and set `CARRIER` in `.env`
 to whoever sold it to you. For SignalWire, run `node tools/signalwire-setup.js --search
@@ -91,13 +106,23 @@ number or a bank account down the phone. With `EARLY_KNOCKOUT=0` all 24 question
 asked and the decision comes at the end, which is the literal reading of the brief; both
 paths are tested and the decision is identical either way.
 
-Digits are where a voice bot fails, so on every digit field a caller can type instead of
-speak and the presses arrive as `dtmf` events on the same socket as the audio. Spoken
-forms are parsed rather than guessed at, so "four eight two one", "forty eight twenty
-one" and "4821" all reach `4821`. After three failures I leave the field empty, since
-writing a guess makes the record wrong in a way nothing downstream can detect while an
-empty field only makes the outcome Incomplete. The JSON also keeps the raw words, the
-time and retries per field and any value that was revised.
+Digits are where a voice bot fails. Spoken forms are parsed rather than guessed at, so
+"four eight two one", "forty eight twenty one" and "4821" all reach `4821`. A number
+read slowly across several turns is added up against the length the field expects instead
+of failing at three digits. The social security digits, the routing number and the
+account number are each read back one character at a time before the call moves on, since
+that is the only read-back a caller can check against the card in their hand. After three
+failures I leave the field empty, since writing a guess makes the record wrong in a way
+nothing downstream can detect while an empty field only makes the outcome Incomplete. The
+JSON also keeps the raw words, the time and retries per field and any value that was
+revised.
+
+The keypad is off. `KEYPAD=on` restores it and selects the older bridge, which is the only
+one that takes touch tones. Touch tones and a speech model share a turn badly: the model
+hears the tones through the same microphone as the caller, writes them down as words and
+files them as an answer to the question the keypad has already answered. Every line the
+server sends then has to be arranged around an entry that may be half typed. The accuracy
+per digit is better and the call finishing at all is worth more.
 
 ---
 
@@ -175,22 +200,34 @@ and a caller saying "twice a month" or "semimonthly" lands on the same value. "T
 week" does not fold in here, since that mistake converted a twice-weekly paycheck at half
 the real figure.
 
+**Student is not one of the employment statuses I offer.** A student has no income and no
+pay cycle behind the status, so the four cadences did not fit and the way out was finding
+the wording that meant "none". The record it produced said Student with an empty cadence
+and no wage, which is what Unemployed already means and already handles. A caller who
+says "student", "in school" or "college" is recorded as Unemployed, which skips the pay,
+income and employer questions and reaches the same decision either way. A student with a
+job answers with the job and lands on Employed.
+
 ---
 
 ## Gaps
 
 1. **The quiet-line timers are reasoned rather than measured.** After 20 seconds of quiet
-   the bot asks "are you still there?"; at 50 it says goodbye and emails the form so far
-   as Incomplete. Both numbers are constants in `bridge.js` rather than anything measured.
-2. **A caller cannot correct an answer more than one question back.** `redo_previous`
-   steps back exactly one field, so a late "actually I make 4,000" gets filed as the
-   answer to whatever was just asked.
+   the bot asks whether the caller is still there and asks the open question again; at 50
+   it says goodbye and emails the form so far as Incomplete. Both numbers are constants
+   in `bridge-voice.js` rather than anything I measured.
+2. **A caller cannot correct an answer more than one question back.** Stepping back moves
+   exactly one field, so a late "actually I make 4,000" gets filed as the answer to
+   whatever was just asked.
 3. **The account number is never verified against the bank.** Plaid or a micro-deposit
    pair would settle it after the phone hangs up, with the application held pending.
-4. **There is no recording, no consent line, no human handoff and no call-back resume.**
-5. **Live coverage is thin.** Most of the bugs real calls turned up were things no
-   stubbed test could reach: the model's exact phrasing, transcription artifacts, a line
-   that goes quiet, an accented name. No transcript is stored either.
+4. **A caller cannot interrupt a line.** The microphone stays shut until the carrier
+   reports the last frame played, which is what stops the bot hearing its own voice on a
+   speakerphone and answering itself. Barge-in needs the two told apart some other way.
+5. **There is no recording, no consent line, no human handoff and no call-back resume,**
+   and no transcript is stored. Most of what live calls turned up was outside anything a
+   stubbed test could reach: a name spelled back with the hyphens still in it, a one word
+   answer transcribed into another language, an option named in the plural.
 
 ---
 
@@ -200,12 +237,14 @@ the real figure.
 |---|---|
 | Twilio US local number | $1.15 / month |
 | Twilio inbound voice | $0.0085 / minute |
-| OpenAI `gpt-realtime` audio in | ~$0.019 / minute |
-| OpenAI `gpt-realtime` audio out | ~$0.077 / minute |
+| OpenAI Realtime, audio in | ~$0.019 / minute |
+| OpenAI speech, out | billed per character rather than per minute |
 
-A four-minute call where the bot talks for two of them is about 25 cents.
-`gpt-realtime-2.1-mini` is roughly a third of that if the accuracy holds and the model is
-one line in `.env`.
+The speech side changed shape when I stopped having the model talk. A full call is about
+2,500 characters of bot speech whatever it takes to say them, so a four-minute call comes
+to roughly 15 cents against the 25 it cost before. Ordinary questions go to `tts-1` and
+the read-backs go to `gpt-4o-mini-tts`, which is the only one of the two I can tell what
+the line is for. Both are one line in `.env`.
 
 ---
 
@@ -217,12 +256,14 @@ src/validate.js   checks a value against the checksum, the FedACH directory and 
 src/fields.js     holds the call script as data: order, wording and which fields are knockouts
 src/intake.js     tracks one call's state: slots, re-asks, giving up, stepping back
 src/decision.js   runs the reject rules with no model and no network
-src/agent.js      holds the model's instructions and its three tools
-src/bridge.js     moves audio between the carrier and OpenAI, with tool calls and keypad
+src/voice.js      turns a line of text into 8 kHz u-law frames the carrier can play
+src/bridge-voice.js  runs one call: transcript in, form, line out
 src/server.js     serves the health check, the TwiML webhook and the media-stream upgrade
 src/format.js     builds the form and the API payload
 src/email.js      sends through the Gmail API
 src/env.js        reads .env
+src/bridge.js     the older bridge, where the model spoke and filed answers through a tool
+src/agent.js      that model's instructions and its three tools
 tools/simulate.js runs the whole call typed instead of spoken
 tools/preflight.js opens a live Realtime session and checks every credential
 tools/scripts.js  holds the canned calls the tests use
@@ -232,4 +273,6 @@ tools/fetch-fedach.js rebuilds the routing directory from the Fed's file
 data/             the FedACH routing directory
 ```
 
-`regressions.test.js` holds one case per bug that has actually shipped here.
+`regressions.test.js` holds one case per bug that has actually shipped here. The last two
+files are reachable only with `KEYPAD=on`; I kept them because they are the only path that
+takes touch tones, so `npm test` runs the suite against both paths.

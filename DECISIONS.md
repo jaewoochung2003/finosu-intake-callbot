@@ -10,31 +10,31 @@ renumbering anything. Each carries the date I settled it and the file it lives i
 Status is **standing**, **reversed** or **open**.
 
 Timeline: I built an outbound bot first (7 Aug), started this inbound intake bot on
-12 Aug, ran live calls through it on 12 and 13 Aug, then ran six adversarial rounds
-against the offline harness on the morning of 13 Aug. Counts as of 13 Aug: 352 checks,
-20 canned scripts, 22 ordinary calls end to end.
+12 Aug, ran live calls through it on 12 and 13 Aug, ran six adversarial rounds against
+the offline harness on the morning of 13 Aug, then took the voice off the model on the
+evening of 13 Aug after a run of live calls none of which could be finished. Counts as of
+13 Aug: 399 checks, 20 canned scripts, 30 ordinary calls end to end.
 
 ---
 
 ## A. Architecture
 
 **A1. I keep the lending rules and the field order out of the model.** *12 Aug,
-standing, `agent.js` / `intake.js` / `decision.js`.*
-The model hears the caller and calls `save_answer` with what it heard; the next question
-comes back to it in the tool result. It never holds the field list, never holds the five
-reject rules and never sees the 2,000 threshold. A caller can argue a model out of a rule
-it holds, while a model holding the field order can drop a field with nothing behind it
-to catch the gap. The cost is a round trip through the server for every question, so the
-bot cannot improvise a follow-up. This is also why prompt injection has nothing to reach:
-there is no tool that sets a decision, a destination or a field.
+standing, `intake.js` / `decision.js`.*
+The model never holds the field list, never holds the five reject rules and never sees the
+2,000 threshold. A caller can argue a model out of a rule it holds, while a model holding
+the field order can drop a field with nothing behind it to catch the gap. The cost is a
+round trip through the server for every question, so the bot cannot improvise a follow-up.
+This is also why prompt injection has nothing to reach: there is no tool that sets a
+decision, a destination or a field. A10 took the rest away as well.
 
 **A2. The model has three tools and only one of them writes to the form.** *12 Aug,
-standing, `agent.js`.*
+reversed 13 Aug by A10, `agent.js`.*
 `save_answer` writes. `redo_previous` steps back. `end_call` hangs up. Both of the other
 two now require the caller's own words as an argument, for the reason in G4.
 
 **A3. I run the call speech to speech rather than speech to text to model to speech.**
-*12 Aug, standing, `bridge.js`.*
+*12 Aug, reversed 13 Aug by A10, `bridge.js`.*
 A three-stage pipeline gives a transcript for free and a slower call; the delay
 compounds on every one of 24 turns. The split between voice and application is one
 function, so a per-field deterministic flow could replace the model on the digit
@@ -42,13 +42,13 @@ questions without touching anything else. What it costs shows up in G1 and in R1
 model files an answer the moment it hears the audio, before any transcript of that audio
 exists.
 
-**A4. Audio crosses untouched.** *12 Aug, standing, `bridge.js`.*
+**A4. Audio crosses untouched.** *12 Aug, reversed 13 Aug by A12, `bridge.js`.*
 The carrier streams G.711 u-law at 8 kHz and the Realtime API takes and returns the same,
 so I copy bytes in both directions with no resampling and no transcoding. Fewer parts,
 less delay. The cost is that there is no text transcript unless I ask for one separately,
 which I have not stored (see O6).
 
-**A5. I play only the lines I wrote.** *13 Aug, standing, `bridge.js`.*
+**A5. I play only the lines I wrote.** *13 Aug, superseded 13 Aug by A10, `bridge.js`.*
 Server VAD creates a response on its own when the caller stops talking. The tool call
 rides inside it, while the model also says whatever it likes in that response because
 nobody has handed it a line yet. Then the tool result comes back and `speak()` creates a
@@ -61,7 +61,8 @@ response id still passes, which is what the fake sockets in the tests drive. The
 version of this gate also passed everything through while no response was being tracked,
 which I added as a hedge for the tests; a response id leaves the tracked set the moment
 that response finishes, so the automatic response landed squarely in the gap between one
-line ending and the next being asked for. That hedge is gone.
+line ending and the next being asked for. That hedge is gone. All of this defends against a model that has a turn, which A10 took
+away a few hours later; the gate is still in the older bridge and nothing needs it now.
 
 **A6. I use one dependency, `ws`, with no web framework.** *12 Aug, standing, `package.json`.*
 Node 18 or newer serves the three routes and the WebSocket upgrade without help. Nothing
@@ -90,6 +91,54 @@ same principle as A1 and it is what carried over. **I have not written down why 
 exercise moved from outbound to inbound.** Fill that in here.
 
 ---
+
+**A10. I took the voice off the model. It listens; I speak.** *13 Aug, standing,
+`voice.js` / `bridge-voice.js`.*
+This reverses A2 and A3 and is the largest thing in the log. Under A3 the model spoke the
+lines I wrote and filed answers through a tool. Over an evening of live calls it
+reworded lines, dropped the question off the end of a read-back so the caller was never
+asked anything, said sentences I had not written, skipped a question and left the caller
+in silence, then answered its own yes-or-no question before the caller had made a sound.
+I fenced off each one and the next appeared. None of them was disobedience: a model
+handed a turn produces a plausible continuation of the conversation; after "is that
+right?" the plausible continuation is "yes", so from inside the turn there is no
+difference between hearing an answer and an answer belonging there. No wording in the
+prompt separates those two, which is why the fences kept failing somewhere new.
+
+So the model gets no turn. Its session carries no tools, no voice and
+`create_response: false`, which is the line that stops the API opening a turn for it every
+time the caller stops talking. A transcript comes back, I run it through `intake.submit`
+and I turn the next line into audio myself. Four things stop being possible rather than
+being defended against: a line cannot be reworded or cut short, a question cannot be
+skipped, an answer cannot be invented because no tool exists to invent one with, then the
+turn cannot be taken early because the microphone stays shut until the carrier reports the
+last frame played.
+
+It costs the transcript round trip A3 was avoiding, about half a second before each line,
+and barge-in. The old bridge is still in the tree behind `KEYPAD=on` because it is the
+only path that takes touch tones.
+
+**A11. The two kinds of line go to different speech models.** *13 Aug, standing,
+`voice.js`.*
+`tts-1` reads text quickly and takes no instruction about how, which is right for a
+question and wrong for a read-back: given "j o e" it reads three characters at the speed
+it reads any others, while turning the speed down stretches each letter rather than pushing
+them apart. `gpt-4o-mini-tts` takes an instruction, so I can tell it the line is a
+spelling, so the same line runs 9.15 seconds against 4.96. The characters are separated
+by commas, since a comma is punctuation a speech model interprets rather than punctuation
+it might read out loud. I tried three dots first and they are worse than either.
+
+**A12. I convert the speech to the telephone's format myself.** *13 Aug, standing,
+`voice.js`.*
+The speech endpoint returns 24 kHz signed 16-bit samples and a phone line carries 8 kHz
+G.711 u-law in 20 ms frames, so a filter and a rate change sit between them. Averaging
+every three samples was the first version and it left the 4 to 8 kHz band in place to
+fold back down into speech as a hiss, so it is a 48-tap windowed sinc at 3.4 kHz now.
+Frames go to the carrier 400 ms at a time; one frame per message with a mark behind each
+is a hundred messages a second and the carrier stutters on the bookkeeping. The streaming
+resampler keeps every leftover sample across chunk boundaries, which it did not at first,
+and the test that catches that feeds it deliberately ragged pieces and requires the output
+to match processing the whole buffer byte for byte.
 
 ## B. The call script
 
@@ -327,9 +376,18 @@ threshold moves every stored application has to be collected again. Move
 holds. A caller who will not name a figure gets the yes/no after three tries, since a
 threshold answer beats an empty field.
 
-**D9. Retired and Student do not trip `NOT_EMPLOYED`.** *12 Aug, standing, `decision.js`.*
+**D9. Retired does not trip `NOT_EMPLOYED`. Student is no longer a status.** *12 Aug,
+amended 13 Aug, `decision.js` / `fields.js`.*
 The brief says "unemployed", so only Unemployed fires it and a retiree with a pension over
 2,000 a month is approved. If that is wrong it is one line.
+
+Student came off the list on 13 Aug after a live call. A student has no income and no pay
+cycle behind the status, so the four cadences did not fit and the way out was finding the
+wording that meant "none". What it produced was Student with an empty cadence and no wage,
+which is what Unemployed already means and already handles: the pay, income and employer
+questions skip, the income slots fill with zero and the decision is the same either way. A
+student with a job answers with the job and lands on Employed, which is the case the
+option existed for and is better served by the question than by an option.
 
 **D10. Under-18 is a rule in `decision.js`, not only a check in intake.** *13 Aug,
 standing, `decision.js`.*
