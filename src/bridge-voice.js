@@ -58,6 +58,10 @@ const ASR_PROMPT = /^(0|off|false|no|none)$/i.test(String(process.env.ASR_PROMPT
   ? ''
   : process.env.ASR_PROMPT || ASR_PROMPT_DEFAULT;
 
+// How long the caller has to stop for before the turn is called over. The caller
+// waits every millisecond of it on every answer, so it is a third of what they feel.
+const vadSilenceMs = () => Number(process.env.VAD_SILENCE_MS || 900);
+
 // A quiet line. The first is a nudge, the second ends the call.
 const QUIET_NUDGE_MS = 20000;
 const QUIET_END_MS = 50000;
@@ -161,7 +165,7 @@ function earSession(model) {
             // The wait it was buying was not the expensive half anyway: measured on a
             // live call, the detector and transcriber together took 0.6 to 1.9
             // seconds and the speech endpoint 0.8 to 1.9.
-            silence_duration_ms: Number(process.env.VAD_SILENCE_MS || 900),
+            silence_duration_ms: vadSilenceMs(),
             create_response: false,
             interrupt_response: false,
           },
@@ -188,8 +192,22 @@ function earSession(model) {
           // got 21 right and no prompt got 20, which settles nothing. That test used
           // generated speech, not a person on a handset, so it cannot settle it.
           // ASR_PROMPT=off turns it off for a call; ASR_PROMPT=<text> replaces it.
+          // gpt-4o-transcribe rather than whisper-1, for the time it takes.
+          //
+          // Measured on eleven clips through the same 8 kHz path a call uses, two
+          // voices each: whisper-1 came back in a median of 969 ms and at worst 1389,
+          // gpt-4o-transcribe in 431 and at worst 548. That half second is paid on
+          // every answer and the caller sits through all of it.
+          //
+          // Accuracy between them is a wash on the same clips, near enough that the
+          // difference is my scoring rather than the models. The one thing
+          // gpt-4o-transcribe does that whisper-1 does not is answer in another
+          // language when the audio is poor and the clip is short, language pinned to
+          // English or not — "No." came back as "こうな。" once. That is refused by the
+          // validators the same as any other noise and costs a re-ask, which is what
+          // whisper-1's own junk costs. ASR_MODEL=whisper-1 puts it back.
           transcription: {
-            model: process.env.ASR_MODEL || 'whisper-1',
+            model: process.env.ASR_MODEL || 'gpt-4o-transcribe',
             language: process.env.ASR_LANGUAGE || 'en',
             ...(ASR_PROMPT ? { prompt: ASR_PROMPT } : {}),
           },
@@ -341,8 +359,9 @@ function handleCall(twilioWs, opts = {}) {
       // Where the wait went, when this line is a reply to something the caller said.
       const waited =
         stoppedTalkingAt && transcriptAt >= stoppedTalkingAt
-          ? ` [wait ${((firstFrameAt || Date.now()) - stoppedTalkingAt) / 1000}s` +
-            ` = vad+asr ${((transcriptAt - stoppedTalkingAt) / 1000).toFixed(2)}` +
+          ? ` [wait ${(((firstFrameAt || Date.now()) - stoppedTalkingAt) / 1000).toFixed(2)}s` +
+            ` = vad ${(vadSilenceMs() / 1000).toFixed(2)}` +
+            ` + asr ${((transcriptAt - stoppedTalkingAt - vadSilenceMs()) / 1000).toFixed(2)}` +
             ` + speech ${(((firstFrameAt || Date.now()) - askedAt) / 1000).toFixed(2)}]`
           : '';
       stoppedTalkingAt = 0;
@@ -511,14 +530,21 @@ function handleCall(twilioWs, opts = {}) {
         nudged = false;
         break;
 
-      // The caller stopped talking. From here to the first sound of the reply is the
-      // wait they actually feel, and it is three things stacked: the silence the voice
-      // detector waits out before calling the turn over, the transcriber's round trip,
-      // and the speech endpoint's. Only the first is a setting. The other two are
-      // somebody else's round trip and the only honest thing to do with them is
-      // measure them, so the log carries both rather than a guess.
+      // The voice detector has called the caller's turn over. That is not the moment
+      // they stopped talking: it fires only after silence_duration_ms of quiet, so the
+      // caller went quiet that much earlier and has been waiting since.
+      //
+      // The log used to start its clock here and call the result "the wait they
+      // actually feel", which was wrong by the whole silence window. It reported 3.1
+      // seconds on a wait of 4.0 and the number was believed, mine included, so the
+      // window never came up as a cost. It is a third of the wait.
+      //
+      // Three things stacked, and the log names all three: the window, the
+      // transcriber's round trip, and the speech endpoint's. Only the first is a
+      // setting here. The other two belong to somebody else and the honest thing is
+      // to measure them rather than guess.
       case 'input_audio_buffer.speech_stopped':
-        stoppedTalkingAt = Date.now();
+        stoppedTalkingAt = Date.now() - vadSilenceMs();
         lastActivity = Date.now();
         nudged = false;
         break;

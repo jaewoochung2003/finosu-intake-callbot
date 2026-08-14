@@ -860,3 +860,31 @@ t('a line that produces no audio stops holding the microphone shut', async () =>
     twilio.emit('message', JSON.stringify({ event: 'stop', streamSid: 'MZstuck', stop: {} }));
   }
 });
+
+// A cache is looked up by the exact text, so an echo warmed under one wording and
+// asked for under another never hits and the caller pays the 1.2 seconds anyway. This
+// walks the closed questions, puts each of their answers through the form, and checks
+// the line that comes out is one the warm list holds.
+t('the echo warmed for a closed question is the echo the form says', () => {
+  const intake = require('../src/intake');
+  const warmable = new Set(intake.fixedLines());
+  // A whole call, answered the way a caller answers it, so the echoes checked are the
+  // strings the form really produces rather than strings this test made up.
+  const said = [
+    'Joe.', 'Mama.', 'Yes.', 'joe at gmail.com', 'Yes.', 'March 1, 1990.', 'No.',
+    'Employed.', 'Weekly.', 'Wednesday.', 'Two thousand.', 'No.', 'No.', 'Checking.',
+  ];
+  const session = intake.startSession({ earlyKnockout: false });
+  const warmed = [];
+  for (const answer of said) {
+    const result = intake.submit(session, answer);
+    if (!result || !result.note || !/^Got it,/.test(result.note)) continue;
+    // The four closed questions. Their answers come from a list, so every echo they
+    // can produce is known before the call and is on the warm list.
+    if (/^Got it, (Employed|Self-employed|Unemployed|Retired|Weekly|Biweekly|Semiweekly|Monthly|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Checking|Savings)\.$/.test(result.note)) {
+      assert.ok(warmable.has(result.note), `closed echo not warmed: ${JSON.stringify(result.note)}`);
+      warmed.push(result.note);
+    }
+  }
+  assert.strictEqual(warmed.length, 4, `expected four warmed echoes, got ${JSON.stringify(warmed)}`);
+});

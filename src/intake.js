@@ -22,7 +22,7 @@
 //   something, and the final value alone does not carry it. Timings cannot be
 //   backfilled later; they either get recorded during the call or they never exist.
 
-const { FIELDS, BY_KEY } = require('./fields');
+const { FIELDS, BY_KEY, EMPLOYMENT_STATUSES, PAY_FREQUENCIES } = require('./fields');
 const {
   allKnockouts,
   screeningSettled,
@@ -742,6 +742,28 @@ function fixedLines() {
   ]);
   for (const field of FIELDS) {
     for (const line of [field.ask, field.reask, field.respell]) if (line) lines.add(line);
+  }
+
+  // The echo, on the questions whose answer comes from a list.
+  //
+  // "Got it, Employed." cannot be made in advance for a name or an address, because
+  // the value is whatever the caller said. On a closed question it can: there are four
+  // work situations, four pay cycles, seven weekdays and two account types, so
+  // seventeen strings cover every echo those questions can produce. They were being
+  // generated live on every call, and an uncached line costs about 1.2 seconds of the
+  // caller's time before the first sound — measured on one call, four of the turns
+  // were exactly these.
+  //
+  // Written the way echoOf writes them, because a cache is looked up by the text and
+  // a line stored under one wording and asked for under another never hits. If echoOf
+  // changes, this has to change with it, which is what the test on it is for.
+  for (const value of [
+    ...EMPLOYMENT_STATUSES,
+    ...PAY_FREQUENCIES,
+    'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday',
+    'Checking', 'Savings',
+  ]) {
+    lines.add(`Got it, ${value}.`);
   }
   return [...lines];
 }
