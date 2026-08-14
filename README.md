@@ -244,9 +244,24 @@ job answers with the job and lands on Employed.
 
 The speech side changed shape when I stopped having the model talk. A full call is about
 2,500 characters of bot speech whatever it takes to say them, so a four-minute call comes
-to roughly 15 cents against the 25 it cost before. Ordinary questions go to `tts-1` and
-the read-backs go to `gpt-4o-mini-tts`, which is the only one of the two I can tell what
-the line is for. Both are one line in `.env`.
+to roughly 15 cents against the 25 it cost before. Less than that in practice, because
+the questions are the same on every call and are made once rather than per call.
+
+A line is routed a sentence at a time. Ordinary sentences go to `tts-1`, which reads what
+it is handed; the sentence that spells a value out goes to `gpt-4o-mini-tts`, the only
+one of the two I can tell what the line is for. It is the only one that spells and it is
+also the one that sometimes says something other than the line, so it gets the letters
+and nothing else — "Is that right?" on the end of a read-back is a fixed string played
+off disk. Both models are one line in `.env`.
+
+The fixed lines live in `data/tts` as finished u-law and are made at startup if the
+folder is empty, which takes about 90 seconds and ten cents, once. Delete the folder to
+rebuild them after changing the voice or the wording. A warmed line reaches the carrier
+in about a millisecond against the 1.2 seconds `tts-1` takes to return its first byte,
+which is most of what a caller hears as the bot being slow to answer. The rest of that
+wait is the 900 ms of silence the voice detector needs before it will call a turn over,
+which is deliberate: at 650 ms one answer came back as two transcripts and the second
+landed in the next field.
 
 ---
 

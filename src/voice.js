@@ -22,6 +22,10 @@
 // will not produce that, so it hands back 24 kHz signed 16-bit samples and the two
 // conversions happen here.
 
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+
 const SPEECH_URL = 'https://api.openai.com/v1/audio/speech';
 // Two engines, because the two kinds of line need different things from one.
 //
@@ -93,6 +97,185 @@ const TTS_STYLE_SPELLED =
 // read-back is single characters standing alone, not which mark stands between them.
 const SPELLED_OUT = /(?:(?:^|[^A-Za-z0-9]+)[A-Za-z0-9](?=[^A-Za-z0-9])){3,}/;
 const styleFor = (text) => (SPELLED_OUT.test(text) ? TTS_STYLE_SPELLED : TTS_STYLE_PLAIN);
+
+// ---------- one line, two engines ----------
+
+// The spelling engine is told what the line is for, which is the whole reason it is
+// here, and being told is not the same as being made to. gpt-4o-mini-tts generates
+// speech rather than reading it, and on a long line it sometimes stops early: the
+// same read-back run twice came back at 7.6 seconds with "Is that right?" on the end
+// and at 6.8 seconds without it, ending after the last letter of the name. A caller
+// heard their name spelled and was never asked anything, so the call sat waiting for
+// a yes to a question nobody had been asked.
+//
+// That is the failure the conversational model was taken off the voice for, one layer
+// down, and it has the same answer: do not give a model that generates the part of
+// the line that has to be exact. A read-back is two kinds of sentence, not one. The
+// letters need an engine that can be told to space them out; "Is that right?" needs
+// an engine that says what it is handed. So the line is cut at its sentence
+// boundaries and each piece goes to the engine it needs. The spelling engine gets the
+// letters and nothing else, and the question at the end goes to tts-1, which reads.
+//
+// Adjacent sentences that want the same engine are joined back up, so an ordinary
+// line is still one request and still sounds like one sentence.
+function sentencesOf(text) {
+  return String(text || '').match(/[^.!?]+(?:[.!?]+|$)/g) || [];
+}
+
+function segments(text) {
+  const parts = [];
+  for (const raw of sentencesOf(text)) {
+    const piece = raw.trim();
+    if (!piece) continue;
+    const spelled = SPELLED_OUT.test(piece);
+    const last = parts[parts.length - 1];
+    if (last && last.spelled === spelled) last.text += ` ${piece}`;
+    else parts.push({ text: piece, spelled });
+  }
+  if (parts.length) return parts;
+  const whole = String(text || '').trim();
+  return whole ? [{ text: whole, spelled: SPELLED_OUT.test(whole) }] : [];
+}
+
+// The first word or two of a line, when it is a word the form uses over and over.
+//
+// "Got it, 473. And the city?" cannot be made in advance, because of the 473. Its
+// first two words can, and split off they play while the endpoint is still working on
+// the rest, so the caller hears the bot start within a millisecond of the answer
+// landing instead of a second and a half later.
+//
+// Off by default, because measured it does not buy what it looks like it buys. The
+// opener is half a second of sound and the piece behind it needs a second to start
+// arriving, so the silence does not go away — it moves from in front of the line to
+// the middle of it, 400 to 1100 ms after "Got it,". Silence before the bot speaks
+// reads as thinking. The same silence one word in reads as a dropped line.
+//
+// Kept because it is the right shape if the front piece ever gets long enough to
+// cover the gap, and because it costs one environment variable to hear it:
+// TTS_SPLIT_OPENERS=on.
+const OPENERS = [/^Got it,(?=\s)/, /^Okay,(?=\s)/, /^Okay\.(?=\s)/, /^No problem\.(?=\s)/, /^Sorry,(?=\s)/];
+const OPENER_TEXT = ['Got it,', 'Okay,', 'Okay.', 'No problem.', 'Sorry,'];
+const SPLIT_OPENERS = /^(1|on|true|yes)$/i.test(String(process.env.TTS_SPLIT_OPENERS || 'off'));
+
+function splitOpener(part) {
+  if (!SPLIT_OPENERS) return [part];
+  for (const re of OPENERS) {
+    const m = part.text.match(re);
+    if (!m) continue;
+    const rest = part.text.slice(m[0].length).trim();
+    if (!rest) break;
+    return [
+      { text: m[0], spelled: false },
+      { text: rest, spelled: SPELLED_OUT.test(rest) },
+    ];
+  }
+  return [part];
+}
+
+// ---------- lines that never change ----------
+//
+// Every question the form asks is the same string on every call, and paying the
+// speech endpoint a second of first-byte latency to hear "And the city?" again is a
+// second of silence the caller sits through for nothing. Those are made once, kept as
+// finished u-law on disk, and played straight off it. A warmed line reaches the
+// carrier in the time it takes to read a file.
+//
+// Only lines put through warm() are ever stored, and warm() is given the form's fixed
+// text. Nothing a caller said reaches this folder: a cached read-back would be
+// somebody's account number sitting in a file, and it would be a single generated
+// take frozen in place — including a short one.
+const cacheDir = () => process.env.TTS_CACHE_DIR || path.join(__dirname, '..', 'data', 'tts');
+const warmed = new Map();
+
+const cacheKey = (text) =>
+  crypto
+    .createHash('sha1')
+    .update(JSON.stringify([modelFor(text), TTS_VOICE, styleFor(text), speedFor(text), text]))
+    .digest('hex');
+
+function sliceFrames(buf) {
+  const frames = [];
+  for (let i = 0; i < buf.length; i += FRAME_BYTES) {
+    frames.push(buf.subarray(i, i + FRAME_BYTES).toString('base64'));
+  }
+  return frames;
+}
+
+// The same split as segments(), except that a sentence already made stands on its
+// own rather than being joined to its neighbour.
+//
+// "Got it, 473. And the city?" is two ordinary sentences and segments() joins them
+// into one request. The second half is a question the form asks on every call and is
+// sitting on disk, so joining them means paying the endpoint to say it again, and
+// paying for it in front of the caller. Split, only "Got it, 473." is generated, the
+// question follows it out of the cache, and the first sound arrives sooner because a
+// short input starts arriving sooner than a long one.
+function piecesOf(text) {
+  const out = [];
+  for (const raw of sentencesOf(text)) {
+    const piece = raw.trim();
+    if (!piece) continue;
+    const ready = warmed.get(piece) || null;
+    const spelled = SPELLED_OUT.test(piece);
+    const last = out[out.length - 1];
+    if (last && !last.ready && !ready && last.spelled === spelled) last.text += ` ${piece}`;
+    else out.push({ text: piece, spelled, ready });
+  }
+  if (out.length) {
+    // A run that was joined back together may itself be a line that was warmed whole
+    // — the greeting is two sentences and is stored as one.
+    for (const part of out) if (!part.ready) part.ready = warmed.get(part.text) || null;
+    return out;
+  }
+  const whole = String(text || '').trim();
+  return whole ? [{ text: whole, spelled: SPELLED_OUT.test(whole), ready: warmed.get(whole) || null }] : [];
+}
+
+// Make the audio for a fixed set of lines, or load it if a previous run made it.
+// Returns what it did, so the server can say so at startup.
+async function warm(lines, opts = {}) {
+  const dir = cacheDir();
+  let made = 0;
+  let loaded = 0;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch {
+    return { made, loaded, held: warmed.size, skipped: 0 };
+  }
+  let skipped = 0;
+  for (const line of lines) {
+    for (const seg of segments(line)) {
+      // The spelling engine's output is a generated take and its text carries the
+      // caller's value, so neither half of it belongs in a cache.
+      if (seg.spelled || warmed.has(seg.text)) {
+        skipped += 1;
+        continue;
+      }
+      const file = path.join(dir, `${cacheKey(seg.text)}.ulaw`);
+      let audio = null;
+      try {
+        audio = fs.readFileSync(file);
+        loaded += 1;
+      } catch {
+        audio = null;
+      }
+      if (!audio) {
+        const frames = [];
+        for await (const f of speechStream(seg.text, opts)) frames.push(Buffer.from(f, 'base64'));
+        audio = Buffer.concat(frames);
+        if (!audio.length) continue;
+        try {
+          fs.writeFileSync(file, audio);
+        } catch {
+          // A cache that cannot be written is a slow call, not a broken one.
+        }
+        made += 1;
+      }
+      warmed.set(seg.text, sliceFrames(audio));
+    }
+  }
+  return { made, loaded, held: warmed.size, skipped };
+}
 
 // The rate the speech endpoint returns raw samples at, and the rate a phone line runs
 // at. 24000 divides by 8000 exactly, so the resample is an average of every three
@@ -238,8 +421,8 @@ function request(text, { apiKey = process.env.OPENAI_API_KEY, signal } = {}) {
 // Two remainders are carried across chunks: input bytes that do not divide into whole
 // groups of three samples, and output bytes that do not fill a 20 ms frame. Dropping
 // either one puts a click in the audio at every chunk boundary.
-async function* speechStream(text, opts = {}) {
-  const res = await request(text, opts);
+async function* framesOf(pending) {
+  const res = await pending;
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
     throw new Error(`speech ${res.status}: ${detail.slice(0, 200)}`);
@@ -274,6 +457,51 @@ async function* speechStream(text, opts = {}) {
   return bytes / PHONE_RATE;
 }
 
+// One line of speech, as base64 frames, in the order they are to be played.
+//
+// A line is one or more pieces, and a piece is either already made — a fixed question
+// warmed onto disk — or a request to the speech endpoint. Every request goes out at
+// once, before the first frame of the first piece is handed over, because the pieces
+// are played back to back and the carrier plays what it has: a piece whose request
+// starts only when the piece before it starts is a hole in the middle of the line.
+// Sent together, the second piece is generating while the first is still playing and
+// arrives well before it is needed. Three or four small requests at once is what a
+// line costs; the alternative is measured in seconds of silence mid-sentence.
+async function* speechStream(text, opts = {}) {
+  const split = piecesOf(text);
+  // Only the front of the line, and only when the front is not already made.
+  const parts =
+    SPLIT_OPENERS && split.length && !split[0].ready
+      ? [...splitOpener(split[0]).map((p) => ({ ...p, ready: warmed.get(p.text) || null })), ...split.slice(1)]
+      : split;
+  // The rejection is caught here so an unawaited request cannot take the process
+  // down; awaiting the same promise below still throws, which is where it is handled.
+  const inflight = parts.map((part) => {
+    if (part.ready) return null;
+    const pending = request(part.text, opts);
+    pending.catch(() => {});
+    return pending;
+  });
+
+  try {
+    for (let i = 0; i < parts.length; i++) {
+      const ready = parts[i].ready;
+      if (ready) {
+        yield* ready;
+        continue;
+      }
+      yield* framesOf(inflight[i]);
+      inflight[i] = null;
+    }
+  } finally {
+    // A caller who hangs up mid-line, or a piece that failed, leaves the rest of the
+    // line's audio arriving at a socket nobody is reading. Close them.
+    for (const pending of inflight) {
+      if (pending) pending.then((res) => res.body && res.body.destroy && res.body.destroy()).catch(() => {});
+    }
+  }
+}
+
 // The whole line at once. Used by the tests and by anything that wants the length
 // before it starts playing.
 async function speechFrames(text, opts = {}) {
@@ -284,6 +512,12 @@ async function speechFrames(text, opts = {}) {
 
 module.exports = {
   makeResampler,
+  segments,
+  piecesOf,
+  splitOpener,
+  OPENER_TEXT,
+  warm,
+  warmed,
   styleFor,
   speedFor,
   modelFor,

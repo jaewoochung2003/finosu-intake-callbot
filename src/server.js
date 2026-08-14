@@ -115,9 +115,30 @@ if (require.main === module) {
     console.error('OPENAI_API_KEY is not set. Copy .env.example to .env and fill it in.');
     process.exit(1);
   }
-  server.listen(PORT, () => {
+  server.listen(PORT, async () => {
     console.log(`callbot listening on :${PORT} (carrier: ${CARRIER})`);
     console.log(`  Voice webhook -> https://<your-tunnel-host>/incoming-call`);
+    // The questions never change, so their audio is made once rather than once per
+    // call. The first run pays the speech endpoint for the whole form and writes it
+    // to data/tts; every run after that reads it off disk. On the keypad path the
+    // model does the talking and there is nothing here to make.
+    if (KEYPAD_ON) return;
+    const voice = require('./voice');
+    const intake = require('./intake');
+    try {
+      const t0 = Date.now();
+      const { made, loaded, held } = await voice.warm(
+        [...intake.fixedLines(), ...voice.OPENER_TEXT],
+        { apiKey: OPENAI_API_KEY },
+      );
+      console.log(
+        `  warmed ${held} fixed lines (${made} made, ${loaded} off disk)` +
+          ` in ${((Date.now() - t0) / 1000).toFixed(1)}s`,
+      );
+    } catch (e) {
+      // A cold cache is a slower call, not a broken one.
+      console.log(`  could not warm the fixed lines: ${e.message}`);
+    }
   });
 }
 

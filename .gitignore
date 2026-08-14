@@ -15,3 +15,6 @@ bin/
 .probe/
 
 line-sample.wav
+
+# audio for the fixed lines, made on first run and rebuilt by deleting this
+data/tts/

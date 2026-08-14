@@ -619,3 +619,120 @@ t('a spelled answer works on every field that takes one', () => {
   assert.strictEqual(P.spokenDigits('4-8-2-1'), '4821');
   assert.strictEqual(P.parseState('V-A'), 'VA');
 });
+
+// The read-back regression of 13 Aug, and the shape that prevents it coming back.
+//
+// Sending the whole read-back to gpt-4o-mini-tts put the closing question inside a
+// generated take, and a generated take sometimes stops early: the same line run twice
+// came back at 7.6 seconds with "Is that right?" on the end and at 6.8 seconds
+// without it. The caller heard their name spelled and was never asked anything, and
+// the call sat waiting for an answer to a question nobody had been asked. Measured
+// over twenty short lines the same engine lost the value five times; tts-1 lost it
+// none. So the letters are the only thing it is given.
+t('the question at the end of a read-back is not left to the spelling engine', () => {
+  const parts = voice.segments("Okay, Joe Mama. That's j, o, e, m, a, m, a. Is that right?");
+  assert.strictEqual(parts.length, 3, 'the read-back was not split into three');
+  assert.strictEqual(parts[0].spelled, false);
+  assert.strictEqual(parts[1].spelled, true, 'the letters did not reach the spelling engine');
+  assert.strictEqual(parts[2].text, 'Is that right?');
+  assert.strictEqual(parts[2].spelled, false, 'the closing question went to the spelling engine');
+  // The digit read-backs have the same shape.
+  const digits = voice.segments('Okay, 0, 2, 1, 0, 0, 0, 0, 2, 1. Is that right?');
+  assert.strictEqual(digits.length, 2);
+  assert.strictEqual(digits[0].spelled, true);
+  assert.strictEqual(digits[1].text, 'Is that right?');
+});
+
+// A line that wants one engine is still one request. Splitting an ordinary sentence
+// in two buys nothing and puts a seam in the middle of it.
+t('an ordinary line is not split up', () => {
+  const parts = voice.segments('Got it, 473. And the city?');
+  assert.strictEqual(parts.length, 1);
+  assert.strictEqual(parts[0].text, 'Got it, 473. And the city?');
+  assert.strictEqual(voice.segments('And the city?').length, 1);
+  assert.deepStrictEqual(voice.segments(''), []);
+});
+
+// Every question is the same string on every call, so its audio is made once. What
+// this checks is that the text a warmed line is stored under is the text the splitter
+// asks for at call time — the two are computed in different places and a line stored
+// under one and looked up under another is a cache that never hits.
+t('a warmed question is played from the cache and the rest of the line is not', () => {
+  const held = voice.warmed;
+  const before = held.size;
+  try {
+    held.set('And the city?', ['AAAA']);
+    const parts = voice.piecesOf('Got it, 473. And the city?');
+    assert.strictEqual(parts.length, 2, 'the warmed question was not split off');
+    assert.strictEqual(parts[0].text, 'Got it, 473.');
+    assert.strictEqual(parts[0].ready, null, 'a line with the caller in it was served from the cache');
+    assert.deepStrictEqual(parts[1].ready, ['AAAA'], 'the warmed question was made again');
+    // And on its own it is the whole line.
+    const alone = voice.piecesOf('And the city?');
+    assert.strictEqual(alone.length, 1);
+    assert.deepStrictEqual(alone[0].ready, ['AAAA']);
+  } finally {
+    held.delete('And the city?');
+    assert.strictEqual(held.size, before);
+  }
+});
+
+// Two sentences that were warmed as one line are looked up as one line. The greeting
+// is the case: it is two sentences, it is stored whole, and sentence-by-sentence
+// neither half is in the cache.
+t('a warmed line of two sentences is found', () => {
+  const held = voice.warmed;
+  const two = 'One thing. Then another.';
+  try {
+    held.set(two, ['BBBB']);
+    const parts = voice.piecesOf(two);
+    assert.strictEqual(parts.length, 1);
+    assert.deepStrictEqual(parts[0].ready, ['BBBB']);
+  } finally {
+    held.delete(two);
+  }
+});
+
+// Nothing a caller said is written to disk. A cached read-back would be somebody's
+// account number sitting in a file, and it would be one generated take frozen in
+// place — including a short one.
+// The line is a spelled piece between two plain ones, and warm() is asked to make all
+// three. It must reach the endpoint for neither of the plain ones — they are already
+// held — and never for the spelled one. If it tried, the fake key below would make it
+// throw rather than pass quietly.
+t('the spelling engine is never cached', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ttscache-'));
+  const was = process.env.TTS_CACHE_DIR;
+  process.env.TTS_CACHE_DIR = dir;
+  const held = voice.warmed;
+  const plain = ['Okay, Joe Mama.', 'Is that right?'];
+  for (const line of plain) held.set(line, ['CCCC']);
+  try {
+    const report = await voice.warm(
+      ["Okay, Joe Mama. That's j, o, e, m, a, m, a. Is that right?"],
+      { apiKey: 'not-a-key' },
+    );
+    assert.strictEqual(report.made, 0, 'warm() went to the endpoint for a spelled line');
+    assert.strictEqual(report.skipped, 3, 'warm() did not see all three pieces');
+    assert.ok(!held.has("That's j, o, e, m, a, m, a."), 'a spelled line was cached');
+  } finally {
+    for (const line of plain) held.delete(line);
+    if (was === undefined) delete process.env.TTS_CACHE_DIR;
+    else process.env.TTS_CACHE_DIR = was;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The form's own text, so a question added to FIELDS is warmed without anyone
+// remembering to add it to a list.
+t('every question the form asks is on the list of fixed lines', () => {
+  const intake = require('../src/intake');
+  const { FIELDS } = require('../src/fields');
+  const lines = intake.fixedLines();
+  assert.ok(lines.includes(intake.GREETING), 'the greeting is not warmed');
+  assert.ok(lines.includes('Is that right?'), 'the read-back question is not warmed');
+  for (const field of FIELDS) {
+    if (field.ask) assert.ok(lines.includes(field.ask), `${field.key} is not warmed`);
+    if (field.reask) assert.ok(lines.includes(field.reask), `${field.key} reask is not warmed`);
+  }
+});

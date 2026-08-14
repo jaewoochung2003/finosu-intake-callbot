@@ -118,8 +118,8 @@ It costs the transcript round trip A3 was avoiding, about half a second before e
 and barge-in. The old bridge is still in the tree behind `KEYPAD=on` because it is the
 only path that takes touch tones.
 
-**A11. The two kinds of line go to different speech models.** *13 Aug, standing,
-`voice.js`.*
+**A11. The two kinds of line go to different speech models.** *13 Aug, amended same day
+by A13, `voice.js`.*
 `tts-1` reads text quickly and takes no instruction about how, which is right for a
 question and wrong for a read-back: given "j o e" it reads three characters at the speed
 it reads any others, while turning the speed down stretches each letter rather than pushing
@@ -127,6 +127,55 @@ them apart. `gpt-4o-mini-tts` takes an instruction, so I can tell it the line is
 spelling, so the same line runs 9.15 seconds against 4.96. The characters are separated
 by commas, since a comma is punctuation a speech model interprets rather than punctuation
 it might read out loud. I tried three dots first and they are worse than either.
+
+What I got wrong was the unit. I routed the whole line, so the read-back's closing
+question went to the spelling engine too — see A13.
+
+**A13. A line is routed a sentence at a time, and the spelling engine only ever gets the
+letters.** *13 Aug, standing, `voice.js`.*
+`gpt-4o-mini-tts` generates speech rather than reading it, and what it generates is not
+reliably the words it was handed. Twenty runs of four short lines lost the value five
+times ("Got it, Potomac." came back as "Got it."); `tts-1` on the same twenty lost it
+none. On a long line it also stops early: the same read-back run twice gave 7.6 seconds
+ending in "Is that right?" and 6.8 seconds ending after the last letter of the name. That
+one is the expensive failure, because the caller hears their name spelled, is never asked
+anything, and the call sits waiting for a yes.
+
+This is the failure A10 took the voice off the conversational model for, one layer down,
+and the answer is the same: a model that generates does not get the part of the line that
+has to be exact. A read-back is two kinds of sentence, not one, so the line is cut at its
+sentence boundaries and each piece goes to the engine it needs. The spelling engine gets
+"That's j, o, e, m, a, m, a." and nothing else, which it handles — eight runs, seven
+letters every time. "Is that right?" is a fixed string and comes off disk. Adjacent
+sentences wanting the same engine are joined back up, so an ordinary line is still one
+request.
+
+The pieces are all requested at once rather than one ahead. Requested one ahead, a piece
+whose audio is half a second long is followed by a piece that takes a second to start
+arriving, and the silence lands in the middle of the line where it reads as a dropped
+call. Together, the worst gap measured across a read-back is 164 ms.
+
+**A14. Every line that is the same on every call is made once and kept.** *13 Aug,
+standing, `voice.js`, `data/tts`.*
+`tts-1` takes a median of 1.2 seconds to return its first byte and occasionally 1.9, and
+the form was paying that again for "And the city?" on every call. The 26 questions, the
+20 re-asks, the greeting and the fixed phrases are made at startup and stored as finished
+u-law under `data/tts`; a warmed line reaches the carrier in about a millisecond. The
+list is built from `FIELDS` rather than written out, so a question added to the form is
+warmed without anyone remembering. First run costs 90 seconds and about ten cents; every
+run after reads the folder.
+
+Only lines passed to `warm()` are stored, and `warm()` is given the form's fixed text.
+Nothing a caller said reaches the folder: a cached read-back would be somebody's account
+number sitting in a file, and it would freeze one generated take in place, including a
+short one.
+
+Splitting a warmed sentence off the line it arrives in is what makes this reach the
+common turn — "Got it, 473. And the city?" generates only the first half. Splitting the
+opener off as well ("Got it," is fixed, the 473 is not) puts the first sound at one
+millisecond, but the opener is half a second of audio in front of a piece that needs a
+second, so the silence moves to the middle of the line instead of going away. It is
+behind `TTS_SPLIT_OPENERS=on`, off.
 
 **A12. I convert the speech to the telephone's format myself.** *13 Aug, standing,
 `voice.js`.*

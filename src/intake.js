@@ -720,8 +720,35 @@ function captureMetrics(session) {
   };
 }
 
+// Every sentence the form says that is the same on every call.
+//
+// These are handed to voice.js at startup, which makes the audio once and keeps it,
+// so a caller waits on the speech endpoint only for the parts of a line that carry
+// their own answer back. The list is built from the form rather than written out, so
+// a question added to FIELDS is warmed without anyone remembering to add it here.
+//
+// Lines the bridge says on its own account are listed too. Anything missing from the
+// list is not broken, only slow.
+function fixedLines() {
+  const lines = new Set([
+    GREETING,
+    'Is that right?',
+    'Sorry, was that a yes or a no?',
+    'Sorry, I did not catch that.',
+    'Are you still there?',
+    'Sorry about that.',
+    "Let's try that one again.",
+    "I'll let you go. Call back when you're ready and we can pick this up.",
+  ]);
+  for (const field of FIELDS) {
+    for (const line of [field.ask, field.reask, field.respell]) if (line) lines.add(line);
+  }
+  return [...lines];
+}
+
 module.exports = {
   GREETING,
+  fixedLines,
   MAX_ATTEMPTS,
   startSession,
   currentField,
