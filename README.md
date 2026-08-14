@@ -71,14 +71,16 @@ Setting this up takes an OpenAI key, a number, a public URL and about ten minute
 
 ```
 cp .env.example .env      # fill in OPENAI_API_KEY
-npm run preflight         # checks the credentials and the Realtime socket
+npm run preflight         # says a line, hears it back, checks every credential
 npm start                 # listens on :5050
 cloudflared tunnel --url http://localhost:5050
 ```
 
-Everything between the caller and the email has tests except the two sockets, which I
-wrote from the documentation, so preflight opens a live Realtime session and checks every
-credential before a call arrives rather than after one fails.
+Everything between the caller and the email has tests except the two sockets to OpenAI,
+which I wrote from the documentation. In preflight I say a line through the same speech
+endpoint the bot speaks with, feed those frames into the same Realtime session the bot
+listens with, then print the words that came back. A wrong model name, or a session shape
+the API no longer accepts, fails there rather than on a live call.
 
 Point a number at `https://<your-tunnel-host>/incoming-call` and set `CARRIER` in `.env`
 to whoever sold it to you. For SignalWire, run `node tools/signalwire-setup.js --search
@@ -265,7 +267,7 @@ src/env.js        reads .env
 src/bridge.js     the older bridge, where the model spoke and filed answers through a tool
 src/agent.js      that model's instructions and its three tools
 tools/simulate.js runs the whole call typed instead of spoken
-tools/preflight.js opens a live Realtime session and checks every credential
+tools/preflight.js says a line, hears it back and checks every credential
 tools/scripts.js  holds the canned calls the tests use
 tools/twilio-setup.js buys a number over the API and points it at the tunnel
 tools/signalwire-setup.js does the same against SignalWire
