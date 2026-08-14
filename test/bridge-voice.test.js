@@ -539,3 +539,17 @@ t('a yes with no nudge open is an ordinary answer', async () => {
   await sleep(20);
   assert.match(call.spoken[call.spoken.length - 1], /email/i, 'the read-back never took its yes');
 });
+
+// A note is said out loud, so it has to read as something a person says. The phone
+// number's was "read back as (240) 278-6143", which is a direction to whoever is
+// speaking, and with nothing speaking but the server the caller heard the direction.
+t('a spoken note is a sentence, not an instruction to whoever is reading it', () => {
+  const V = require('../src/validate');
+  const phone = V.validatePhone('240 278 6143');
+  assert.ok(phone.ok);
+  assert.doesNotMatch(phone.note, /^read back/i, `the caller hears: ${phone.note}`);
+  assert.match(phone.note, /^Got it, \(240\) 278-6143/);
+  const income = V.validateMonthlyIncome('two thousand a month', 'Monthly');
+  assert.ok(income.ok);
+  assert.match(income.note, /^Got it,/, `the caller hears: ${income.note}`);
+});

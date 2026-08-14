@@ -371,7 +371,10 @@ function validatePhone(said) {
     return { ok: false, error: 'that is not a working phone number' };
   }
   const value = `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
-  return { ok: true, value, note: `read back as ${value}` };
+  // A note is said out loud, so it is written as something a person says. This one
+  // was "read back as (240) 278-6143", which is a direction to whoever is speaking,
+  // and with nothing speaking but the server the caller heard the direction.
+  return { ok: true, value, note: `Got it, ${value}` };
 }
 
 function validateZip(said) {
@@ -477,7 +480,9 @@ function validateMonthlyIncome(said, payFrequency) {
   return {
     ok: true,
     value: monthly,
-    note: `about ${monthly.toLocaleString('en-US')} dollars a month`,
+    // Said out loud, so it is a sentence rather than a label. It was "about 2,000
+    // dollars a month", which came out of the phone as a sentence starting mid-thought.
+    note: `Got it, about ${monthly.toLocaleString('en-US')} dollars a month`,
   };
 }
 
