@@ -225,6 +225,30 @@ function validateDeployed(said) {
   ) {
     return { ok: true, value: true };
   }
+
+  // The caller's own deployment, stated rather than answered yes.
+  //
+  // The dependent half of the rule was handled above and the applicant's own half was
+  // not, which is backwards: "my husband is deployed" came back yes while "I am
+  // deployed" came back as a re-ask, and so did "I'm on deployment", "currently
+  // deployed" and "I am stationed overseas right now". None of them contains a word
+  // parseYesNo counts as a yes, so all six fell through it to null. A caller saying
+  // the thing the rule exists to catch was asked again, and after three tries the
+  // field went down as not captured.
+  //
+  // Guarded twice. PAST_SERVICE keeps a veteran describing prior service out of it,
+  // and a plain reading that already came back no wins outright, because the negation
+  // sits in words this test does not look at: "never been deployed" and "I'm not
+  // deployed" both mention a deployment and both mean no.
+  if (
+    IS_DEPLOYED_NOW.test(text) &&
+    !PAST_SERVICE.test(text) &&
+    !VETERAN_STATUS.test(text) &&
+    P.parseYesNo(said) !== false
+  ) {
+    return { ok: true, value: true };
+  }
+
   return validateYesNo(said);
 }
 

@@ -100,6 +100,11 @@ const NO = new Set([
   'nah', 'negatory', 'uhuh', 'nuhuh',
 ]);
 
+// Whole answers that are a transcriber's version of "no" and nothing a caller would
+// ever say on purpose. Matched against the entire answer, never against a word inside
+// one — see parseYesNo for why that distinction is the whole safety of it.
+const SOUNDS_LIKE_NO = new Set(['now', 'know', 'you know']);
+
 // ---------- helpers ----------
 
 function words(text) {
@@ -358,6 +363,27 @@ function parseYesNo(text) {
 
   if (REFUSAL.test(joined)) return null;
   if (DONT_KNOW.test(joined)) return null;
+
+  // What a short "no" comes back as over a telephone.
+  //
+  // A phone line carries 300 to 3400 Hz, and a one-word answer gives the transcriber
+  // almost nothing to decide on, so it writes the commoner English word. On the call
+  // of 13 Aug "no" came back as "Now" three times, on three different questions, and
+  // each one cost a re-ask that the caller then answered "no" to. The answer recorded
+  // was the same either way; it just took two turns and a repeated question to get
+  // there.
+  //
+  // Only when it is the whole answer. Inside a sentence these are ordinary words and
+  // must stay ordinary: "I'm deployed now" is a yes, and reading the "now" in it as a
+  // no would decline a deployed caller on a rule that exists to protect them.
+  //
+  // Safe in the direction that matters. Nothing meaning yes is confusable with these:
+  // a caller agreeing says "yes", "yeah", "yep" or "I am, and none of those is a
+  // vowel away from "now". So this cannot turn an affirmative into a negative. It
+  // turns an answer that means nothing at all into the one the caller gave. The raw
+  // text is kept in the capture log next to the value either way, so the record shows
+  // what was heard as well as what was written.
+  if (SOUNDS_LIKE_NO.has(joined)) return false;
 
   // An intensifier is not an answer. "Absolutely", "definitely" and "certainly" sit in
   // the YES set because they are a yes on their own, but they are also the first word

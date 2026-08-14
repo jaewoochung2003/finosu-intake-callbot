@@ -1219,3 +1219,67 @@ t('regression: the unemployed income skip does not touch employed callers', () =
   assert.ok(pf.appliesWhen({ employment_status: 'Student' }));
   assert.ok(!pf.appliesWhen({ employment_status: 'Unemployed' }));
 });
+
+// The call of 13 Aug where every yes/no question took two turns.
+//
+// A phone line carries 300 to 3400 Hz and a one-word answer gives the transcriber
+// almost nothing to decide on, so it writes the commoner English word. "No" came back
+// as "Now" three times on three different questions, each costing a re-ask that the
+// caller then answered "no" to. Same value recorded, two turns later, with the whole
+// question repeated in between.
+t('a "no" the transcriber wrote as "now" is still a no', () => {
+  const P = require('../src/parse');
+  assert.strictEqual(P.parseYesNo('Now.'), false);
+  assert.strictEqual(P.parseYesNo('now'), false);
+  assert.strictEqual(P.parseYesNo('Know.'), false);
+  assert.strictEqual(P.parseYesNo('You know.'), false);
+});
+
+// Only as the whole answer. Inside a sentence these are ordinary words, and reading
+// the "now" in "I'm deployed now" as a no would decline a deployed caller under the
+// rule that exists to protect them.
+t('the same words inside a sentence are left alone', () => {
+  const P = require('../src/parse');
+  const V = require('../src/validate');
+  assert.notStrictEqual(P.parseYesNo('im deployed now'), false);
+  assert.strictEqual(V.validateDeployed('I am deployed right now').value, true);
+  assert.strictEqual(V.validateDeployed('my husband is deployed now').value, true);
+  // And the ones that really are a no still are.
+  assert.strictEqual(P.parseYesNo('not right now'), false);
+  assert.strictEqual(P.parseYesNo('right now, no'), false);
+});
+
+// The applicant's own half of the deployment rule.
+//
+// The dependent half was handled and this one was not: "my husband is deployed" came
+// back yes while "I am deployed" came back as a re-ask, because none of these phrasings
+// contains a word the plain yes/no reader counts as a yes. A caller saying the thing
+// the rule exists to catch was asked again, and after three tries went down as not
+// captured.
+t('a caller who says they are deployed is read as deployed', () => {
+  const V = require('../src/validate');
+  for (const said of [
+    'I am deployed',
+    'im deployed',
+    'I am deployed right now',
+    "I'm on deployment",
+    'currently deployed',
+    'I am stationed overseas right now',
+    "I'm active duty on deployment",
+  ]) {
+    const r = V.validateDeployed(said);
+    assert.ok(r.ok && r.value === true, `not read as deployed: ${said}`);
+  }
+});
+
+// And the guards on it, which are the whole reason it is safe. A negation lives in
+// words the deployment test does not look at.
+t('saying a deployment happened or did not is not saying one is happening', () => {
+  const V = require('../src/validate');
+  for (const said of ["I'm not deployed", 'not deployed', 'never been deployed', 'no im not deployed', "I'm a veteran"]) {
+    const r = V.validateDeployed(said);
+    assert.ok(r.ok && r.value === false, `not read as a no: ${said}`);
+  }
+  // Prior service still re-asks rather than guessing either way.
+  assert.strictEqual(V.validateDeployed('I was deployed').ok, false);
+});
