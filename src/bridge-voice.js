@@ -47,6 +47,17 @@ const OPENAI_MODEL = process.env.OPENAI_REALTIME_MODEL || 'gpt-realtime';
 const REPORT_TO = process.env.REPORT_TO || 'jaewoochung2003@gmail.com';
 const CALLS_DIR = path.join(__dirname, '..', 'calls');
 
+// What the transcriber is told to expect. See earSession for why it is a switch.
+const ASR_PROMPT_DEFAULT =
+  'A loan application taken over the phone. Expect these answers: employed, ' +
+  'self-employed, unemployed, retired, student, checking, savings, weekly, ' +
+  'biweekly, every two weeks, twice a month, monthly, yes, no. Also names, ' +
+  'email addresses, street addresses, dollar amounts, dates of birth, and ' +
+  'routing and account numbers read out as digits.';
+const ASR_PROMPT = /^(0|off|false|no|none)$/i.test(String(process.env.ASR_PROMPT || ''))
+  ? ''
+  : process.env.ASR_PROMPT || ASR_PROMPT_DEFAULT;
+
 // A quiet line. The first is a nudge, the second ends the call.
 const QUIET_NUDGE_MS = 20000;
 const QUIET_END_MS = 50000;
@@ -162,15 +173,20 @@ function earSession(model) {
           // "students" back, three times, and "students" is the commoner word in
           // ordinary English. The list is the closed answers this form asks for, so
           // the one place a single word decides a field is the place it has help.
+          //
+          // It is a switch because the evidence for it is thin in both directions.
+          // whisper reads a prompt as text to carry on from rather than as a
+          // vocabulary, so on audio it is unsure of it can follow the prompt instead
+          // of the sound — which is where "Learn more at www.aclu.org" and "Transcribed
+          // by https://otter.ai" come from, and both turned up in testing. Measured
+          // over 28 words put through the same 8 kHz path a call uses, the long prompt
+          // got 21 right and no prompt got 20, which settles nothing. That test used
+          // generated speech, not a person on a handset, so it cannot settle it.
+          // ASR_PROMPT=off turns it off for a call; ASR_PROMPT=<text> replaces it.
           transcription: {
-            model: 'whisper-1',
+            model: process.env.ASR_MODEL || 'whisper-1',
             language: process.env.ASR_LANGUAGE || 'en',
-            prompt:
-              'A loan application taken over the phone. Expect these answers: employed, ' +
-              'self-employed, unemployed, retired, student, checking, savings, weekly, ' +
-              'biweekly, every two weeks, twice a month, monthly, yes, no. Also names, ' +
-              'email addresses, street addresses, dollar amounts, dates of birth, and ' +
-              'routing and account numbers read out as digits.',
+            ...(ASR_PROMPT ? { prompt: ASR_PROMPT } : {}),
           },
         },
       },
