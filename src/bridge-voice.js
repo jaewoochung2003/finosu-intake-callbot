@@ -301,7 +301,11 @@ function handleCall(twilioWs, opts = {}) {
       let firstFrameAt = 0;
       const stream = speakOverride
         ? speakOverride(text)
-        : voice.speechStream(text, { apiKey: openaiApiKey });
+        : voice.speechStream(text, {
+            apiKey: openaiApiKey,
+            onRetry: (piece, err) =>
+              log(session.callSid, 'speech retry:', err.message, '::', V.redact(openKey(), piece).slice(0, 60)),
+          });
       // Frames go out in batches, not one at a time.
       //
       // One 20 ms frame per websocket message, each with a mark behind it, is a

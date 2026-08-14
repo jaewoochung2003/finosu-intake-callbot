@@ -547,6 +547,11 @@ async function* speechStream(text, opts = {}) {
         // in a different reading of the line, halfway through a sentence. A request
         // that timed out with nothing to show is usually one that would have worked.
         if (sent) throw e;
+        // Said out loud, because a retry that works leaves no other trace. The call
+        // that went quiet on 13 Aug had nothing in the log at all, and a near miss —
+        // one attempt lost, the second fine, the caller hearing only a longer pause —
+        // is the same fault a second before it costs anything.
+        if (opts.onRetry) opts.onRetry(parts[i].text, e);
         inflight[i] = start(parts[i]);
         yield* framesOf(inflight[i]);
       }
